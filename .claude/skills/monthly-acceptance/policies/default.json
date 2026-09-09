@@ -1,0 +1,171 @@
+{
+  "version": "0.0.1",
+  "description": "当前全景与议题政策；完整查询与业务问题分别计数。旧召回、分类和原因残余字段仅供 3.x 兼容，不决定新议题分母、停止或放行。调整须生成新运行。",
+  "levels": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "comparisons": {
+    "mom": 1,
+    "yoy": 12
+  },
+  "price_bands": {
+    "cn": [
+      50,
+      100,
+      300,
+      500,
+      1000,
+      3000
+    ],
+    "US": [
+      10,
+      25,
+      50,
+      100,
+      200,
+      500
+    ],
+    "DE": [
+      10,
+      25,
+      50,
+      100,
+      200,
+      500
+    ],
+    "JP": [
+      1000,
+      3000,
+      5000,
+      10000,
+      30000,
+      50000
+    ]
+  },
+  "signals": {
+    "units_change": 0.3,
+    "amount_change": 0.3,
+    "spu_change": 0.3,
+    "band_share_pp": 10,
+    "gross_change_ratio": 0.5,
+    "cancellation_ratio": 0.7,
+    "churn_ratio": 0.4
+  },
+  "investigation": {
+    "head_share": 0.9,
+    "absolute_change_share": 0.8,
+    "high_change": 0.5,
+    "parent_exposure": 0.05
+  },
+  "investigation_workflow": {
+    "max_parallel_agents": 8,
+    "max_parallel_queries": 1,
+    "max_obligations_per_assignment": 8,
+    "max_unexplained_ratio": 0.01,
+    "max_unexplained_band_pp": 0.5
+  },
+  "page_size": 10000,
+  "timeout_seconds": 90,
+  "retry_count": 1,
+  "amount_tolerance": 0.01,
+  "sample_seed": "acceptance-v3",
+  "sample_per_category": 2,
+  "raw_table": "internal.flywheel.monthly_sales_wide_new",
+  "std_table": "internal.flywheel.monthly_sales_with_dim",
+  "materiality": {
+    "version": "0.0.1",
+    "basis": "试运行调查续排容差：对完整可复算总体保留1%量额/SPU观察残余与0.5个百分点价格带残余；未经校准为业务误差许可。缺数据、身份不明、关键冲突、历史具体义务不豁免。",
+    "scope": "每义务及同国家同类目同月去重累计；量额正负分别",
+    "ratio_tolerance": 0.01,
+    "band_pp_tolerance": 0.5,
+    "business_release_tolerance": null,
+    "unknown_risk": "investigate_or_explicit_external_block",
+    "change_control": "new_run_with_frozen_rationale",
+    "compatibility_note": "max_unexplained_ratio 仅供 3.x 冻结兼容；当前问题续查以未回答的质量疑问为准，不以普通变化解释率驱动。"
+  },
+  "coverage_gate": {
+    "enabled": true,
+    "sample_per_stratum": 1,
+    "seed": "acceptance-v32-no-signal",
+    "strata": [
+      "site",
+      "month"
+    ],
+    "history_requires_exact_entities": true
+  },
+  "review_gate": {
+    "enabled": true,
+    "independent_for": [
+      "high",
+      "historical",
+      "evidence_conflict",
+      "previous_miss"
+    ],
+    "raw_evidence_and_recalculation_required": true
+  },
+  "case_workflow": {
+    "enabled": true,
+    "version": "0.0.1",
+    "collection_priority_threshold": 0.02,
+    "threshold_meaning": "观察变化强度，仅取证排序；不决定放行、错误概率或剩余风险上界",
+    "automatic_business_closure": false,
+    "root_cause_merge_requires_entity_mechanism_proof": true,
+    "rule_mode": "shadow_first",
+    "budget_exhaustion": "checkpoint_capacity_pending",
+    "identity_shard_size": 100,
+    "business_classification": {
+      "decisions": [
+        "investigation_route",
+        "report_placement"
+      ],
+      "reviewed_defer_changes_applicable_denominator": true,
+      "automatic_materiality_threshold": null
+    }
+  },
+  "machine_diagnostics": {
+    "identity_shard_size": 100,
+    "collection_month_span": 6,
+    "trace_month_span": 6
+  },
+  "question_workflow": {
+    "enabled": true,
+    "ordinary_observations_create_obligations": false,
+    "sampling_population": "all_applicable_cells",
+    "unexplained_market_change_is_continuation": false
+  },
+  "expected_platforms": {
+    "cn": [
+      "Taobao",
+      "Tmall"
+    ],
+    "US": [
+      "Amazon"
+    ],
+    "DE": [
+      "Amazon"
+    ],
+    "JP": [
+      "Amazon"
+    ]
+  },
+  "platform_contract_basis": "验收/config.yaml 与 项目范围.md：cn 淘宝/天猫，US/DE/JP Amazon；代码大小写及别名须在项目 override 中明确，不以已观测平台反推预期。",
+  "compatibility_notes": {
+    "legacy_only": [
+      "signals",
+      "investigation",
+      "materiality",
+      "investigation_workflow.max_unexplained_ratio",
+      "investigation_workflow.max_unexplained_band_pp",
+      "case_workflow.business_classification",
+      "case_workflow.collection_priority_threshold",
+      "case_workflow.rule_mode",
+      "machine_diagnostics"
+    ],
+    "shared_contract_versions": "当前运行、政策、问题合同、台账及覆盖协议统一为 0.0.1；历史格式常量仅用于读取旧冻结材料。",
+    "active_workflow": "architecture=panorama_questions；旧配置不能关闭当前议题协议。"
+  },
+  "architecture": "panorama_questions"
+}

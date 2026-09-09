@@ -1,0 +1,24 @@
+# This repository only publishes the acceptance Skill and release documentation.
+/*
+!/.gitignore
+!/README.md
+!/AGENTS.md
+!/VERSION
+!/requirements.txt
+!/.claude/
+/.claude/*
+!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/monthly-acceptance/
+!/.agents/
+/.agents/*
+!/.agents/skills/
+/.agents/skills/*
+!/.agents/skills/monthly-acceptance
+.env
+.env.*
+**/__pycache__/
+**/.pytest_cache/
+**/.ruff_cache/
+*.pyc
+.DS_Store
