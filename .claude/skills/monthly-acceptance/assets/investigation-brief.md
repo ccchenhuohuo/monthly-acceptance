@@ -1,4 +1,4 @@
-# 问题调查任务简报（0.0.1）
+# 问题调查任务简报（0.0.2）
 
 先阅读本子包 `brief.json` 中的 task、obligations、完整 `question_scope` 合同及 `source_material`。以实际问题、范围、检查、反向分量和停止条件开展调查；不得用本提示替换冻结合同。详细字段以 [问题协议](../references/question-workflow.md) 为准。
 

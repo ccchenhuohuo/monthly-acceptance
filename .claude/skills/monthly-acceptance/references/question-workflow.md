@@ -1,8 +1,8 @@
-# 全景、议题与审核协议（0.0.1）
+# 全景、议题与审核协议（0.0.2）
 
 ## 权威对象与版本
 
-当前发布、运行、政策、协议、台账与抽样数据格式版本统一为 `0.0.1`；使用显式 `architecture="panorama_questions"` 识别当前全景与议题架构。旧版本号仅用于旧冻结运行的兼容分支，不作为当前架构的版本门槛。
+当前发布、运行、政策、协议、台账与抽样数据格式版本统一为 `0.0.2`；使用显式 `architecture="panorama_questions"` 识别当前全景与议题架构。旧版本号仅用于旧冻结运行的兼容分支，不作为当前架构的版本门槛。
 
 - `coverage-plan.json`：从冻结配置/预期平台/完整查询生成的检查分母。`panorama/index.json` 绑定完整查询及全部派生事实，具体约束具有独立 passed/failed/unavailable/not_applicable 状态。
 - `panorama/facts-*.json`：连续的全部标准路径×自然月，含无观测，保留价格带、SPU/品牌进入退出和正负贡献。多平台国家（当前仅中国淘系）每个事实另带 `platform_split` 逐平台量额，并有 `platform_split_conservation` 校验各平台之和等于该国类目合计——只塌在单一平台上的缺陷不会再被国家级类目汇总稀释。raw-paths、platforms、country-layers 保留完整上下文及原始行定位。读取 JSON 的全量路径/月份分区，不只看排序结果。
@@ -107,7 +107,7 @@ blocked_external 的每个受阻动作必须指明 type、required_record、prov
 baseline-review 使用既有覆盖来源，明确 check_id、不同 investigator_id/reviewer_id、status、finding/action/counterevidence、evidence_ids/raw_locators。程序绑定全部引用材料的哈希，审后重验。
 
 - 抽查从全体适用 L3 单元按原种子和国家×月分层。确定样本必须全部核对原始复合键；失败扩展同国检查总体，并绑定覆盖实际范围的议题，不生成全体 SKU 深查义务。
-- 历史回归可在台账条目上写 `expectation`：`must_exist`（默认，维持原口径）、`must_not_exist`（修复后对象应当离开原位置）、`property`（字段须达到 field/comparison/value）、`aggregate`（匹配对象的字段合计须满足比较）。缺失与属性类预期按**完整查询结果**判定而非引用行：该月完整查询无任何结果时只能保留 unavailable（不能区分已修复与未观测），并且仍须在原时期给出原始对象以证明缺陷曾经成立。
+- 历史回归可在台账条目上写 `expectation`：`must_exist`（默认，维持原口径）、`must_not_exist`（修复后对象应当离开原位置）、`property`（字段须达到 field/comparison/value）、`aggregate`（匹配对象的字段合计须满足比较）。预期可按数据层分写 ——分类修复类缺陷通常 raw 保持 must_exist（对象仍在源层），std 写 must_not_exist（离开错误标准路径），未写的层沿用默认。缺失与属性类预期按**完整查询结果**判定而非引用行：该月完整查询无任何结果时只能保留 unavailable（不能区分已修复与未观测），并且仍须在原时期给出原始对象以证明缺陷曾经成立。
 - 历史来源逐段清点；必要回归核具体原始对象、原月份和新月份、raw/std。历史 `passed` 需分别提供 `raw_object_locators / std_object_locators` 和 `raw_proof_jobs / std_proof_jobs`；后两者逐页使用 `evidence_id / job_id / record_sha256` 绑定原生执行、不可变计划与完整分页。对象定位必须属于对应层的已验证查询。单值、多值 ID 或 `sku_keys` 均须还原国家/平台/父体/必要 SKU；历史时期或复合身份不明确时保留 unavailable。自报 verified_object_ids、附件自报 SQL 或只修展示不授予回归信用。纯语义事项以有出处的辅助处置保留，不设语义正确性测试。
 - 内部对账需要真实冻结内部数据及双方复算，并且应当声明 `reconciliation_contract`：left/right 各自的 source/grain/period/unit、match_keys、tolerance、difference（绑定实际复算并与其结果一致）与 unmatched（未匹配行数，非零时须给金额规模和具体说明）。**两方 grain/period/unit 不一致即判不可比**——复算只证明算术，从不证明两边可比；差异超出所声明容差不能记通过。契约整体缺失不阻断记录，但会作为 limitation 落在覆盖里，本次不构成无保留通过；契约一旦写了就必须自洽，不自洽仍是硬错误。发布元数据不能替代实际对象量额承接。缺输入如实 unavailable；不能把缺证写成不适用。
 - 明确失败按其**完整适用范围**归属：约束未写平台/层时代表该国全部冻结平台与适用数据层，未写路径代表全站；缺失维度是完整集合，不是任意一个成员。一个 scope_unit 只认领它实际覆盖的格子，其余格子须由别的议题补齐，多个 scope_units 的并集可共同认领；`failure_scope_coverage` 逐约束列出 required/covered/missing_cells。如果已完成证据调查并打回，检查失败可有完成的处置，业务仍 reject。未核或受阻不记 verified。

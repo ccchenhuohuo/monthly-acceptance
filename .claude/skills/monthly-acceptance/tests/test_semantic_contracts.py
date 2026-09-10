@@ -242,3 +242,18 @@ def test_missing_reconciliation_contract_is_a_declared_gap_not_a_hard_stop(tmp_p
     saved=questions.record_baseline_review(run,'main',value)
     assert saved['status']=='passed' and '未声明左右来源' in saved['contract_limitation']
     assert any('未声明左右来源' in x for x in questions.coverage_status(run)['review_limitations'])
+
+
+def test_declared_limitations_are_named_in_the_report(tmp_path):
+    """A limitation denies an unreserved pass, so hiding it makes the run read as clean."""
+    run=_internal_run(tmp_path)
+    value=_reconciliation(run);value.pop('reconciliation_contract')
+    questions.record_baseline_review(run,'main',value)
+    result=questions.validate(run,persist=False)
+    assert result['limitations'] and result['business_verdict']=='undetermined'
+    questions.render(run)
+    report=(run.path/'报告.md').read_text()
+    assert '已声明限制' in report
+    for limitation in result['limitations']:
+        if isinstance(limitation,dict):assert limitation['rule'] in report,limitation['check_id']
+        else:assert limitation in report,limitation

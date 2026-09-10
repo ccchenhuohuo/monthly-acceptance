@@ -578,14 +578,19 @@ COMPARISONS={'eq':lambda a,b:a==b,'ne':lambda a,b:a!=b,'lt':lambda a,b:a<b,
              'le':lambda a,b:a<=b,'gt':lambda a,b:a>b,'ge':lambda a,b:a>=b}
 
 
-def _regression_expectation(issue):
+def _regression_expectation(issue,layer=None):
     """A repaired defect often means the object must be GONE, not still present.
 
     Absent an explicit expectation the historical rule stays exactly as before:
     the object must still be observable in every historical month and the current
-    month. Issues that expect removal or a corrected value say so themselves.
+    month. Issues that expect removal or a corrected value say so themselves. The
+    expectation may be written per data layer: a classification repair means the
+    object leaves the wrong std path while it still exists in raw.
     """
     spec=issue.get('expectation') or issue.get('legacy_detail',{}).get('expectation')
+    if isinstance(spec,dict) and spec and set(spec)<= {'raw','std'}:
+        if layer is None:raise ValueError('分层预期须指明数据层')
+        spec=spec.get(layer)
     if spec is None:return {'predicate':'must_exist','months':None}
     if not isinstance(spec,dict) or spec.get('predicate') not in PREDICATES:
         raise ValueError('历史回归预期谓词须为 '+'/'.join(PREDICATES))
@@ -618,7 +623,7 @@ def _compare(expect,observed):
     return op(float(observed),float(want))
 
 
-def _verify_regression_layer(run,issue,rows,complete_rows=None):
+def _verify_regression_layer(run,issue,rows,complete_rows=None,layer=None):
     targets=_regression_objects(run,issue)
     historical_months=set()
     for source in (issue.get('legacy_detail',{}),issue):
@@ -627,7 +632,7 @@ def _verify_regression_layer(run,issue,rows,complete_rows=None):
     if not historical_months:raise ValueError('历史时期未明确；仅有新月不能通过回归，须保留 unavailable')
     required_months=historical_months | {run.manifest['data_month']}
     for mm in required_months:month(mm)
-    expect=_regression_expectation(issue)
+    expect=_regression_expectation(issue,layer)
     if expect['predicate']=='must_exist':
         for target in targets:
             for mm in required_months:
@@ -723,7 +728,7 @@ def record_baseline_review(run,actor,value,*,_audit=False):
                     issue.get('site',scope.get('site')),native_only=True)
                 if any(l['evidence_id'] not in allowed for l in layer_refs):raise ValueError('历史对象定位未属于该层完整原生查询证明')
                 complete=[r for owner,job in checked_jobs for r in owner.job_rows(job['job_id'])]
-                _verify_regression_layer(run,issue,[review.locator(run.get_evidence,l) for l in layer_refs],complete)
+                _verify_regression_layer(run,issue,[review.locator(run.get_evidence,l) for l in layer_refs],complete,layer=layer)
                 table=run.policy[layer+'_table']
                 for l in layer_refs:
                     _,_,_,payload=review._receipt_origin(run,run.get_evidence,l['evidence_id'])
@@ -1016,9 +1021,11 @@ def render(run):
         if not cases:continue
         lines += ['## '+title,'']
         for c in cases:
-            f=findings.get(c['case_id'],{});lines += ['### '+c.get('display_title',c['business_question']),'',
-                c['business_question'],'',
-                f.get('assessment','待调查；起因事实尚不能证明缺陷。'),'',
+            # 没有单独的短标题时，标题就是业务问题本身；再原样打一遍只是逐字重复。
+            f=findings.get(c['case_id'],{});head=c.get('display_title') or c['business_question']
+            lines += ['### '+head,'']
+            if c['business_question']!=head:lines += [c['business_question'],'']
+            lines += [f.get('assessment','待调查；起因事实尚不能证明缺陷。'),'',
                 '范围：'+'；'.join(u['site']+' '+','.join(u['platforms'])+' '+','.join(u['event_months'])+' '+canonical(u['paths']) for u in c['scope_units'])]
             for field,label in [('observation_change','观察变化'),('proven_error','已证错误影响'),('unresolved_quality_risk','未解决质量风险'),('counterevidence','反证与边界')]:
                 if f.get(field):lines += [label+'：'+(f[field] if isinstance(f[field],str) else canonical(f[field]))]
@@ -1031,7 +1038,20 @@ def render(run):
     lines+=['## 检查覆盖与限制','',
         '客观检查：'+canonical(cov.get('constraint_states',{}))+'；未归属失败 '+str(len(cov.get('unowned_failure_ids',[])))+'。',
         '抽查、历史、内部与发布承接：'+canonical(cov.get('baseline_check_states',{}))+'。',
-        '待完成门槛：'+('、'.join(validation['errors']) or '无'),'','各国金额分别保留本币。查询复用不是新查询，指纹相同也不代表事务快照。']
+        '待完成门槛：'+('、'.join(validation['errors']) or '无')]
+    # A limitation denies an unreserved pass. Left unprinted, a run reads as
+    # undetermined with no gate named. 客观检查不可判定同时是待完成门槛（见上一行），
+    # 所以这里不能笼统写「不阻断执行」——那与它自己列出的条目矛盾。
+    stated=[x for x in validation['limitations'] if not isinstance(x,dict)]
+    records=[x for x in validation['limitations'] if isinstance(x,dict)]
+    lines+=['已声明限制（不构成无保留通过；其中客观检查不可判定同时计入上方待完成门槛）：']
+    lines+=['- '+str(x) for x in stated]
+    if records:
+        grouped=Counter(str(r.get('family'))+'/'+str(r.get('rule'))+' '+str(r.get('site')) for r in records)
+        lines+=['- 客观检查不可判定 '+str(len(records))+' 条：'+canonical(dict(sorted(grouped.items())))
+                +'；逐条 check_id 见 validation.json 的 limitations。']
+    if not validation['limitations']:lines+=['- 无']
+    lines+=['','各国金额分别保留本币。查询复用不是新查询，指纹相同也不代表事务快照。']
     (run.path/'报告.md').write_text('\n'.join(lines)+'\n')
     write(run.path/'execution-metrics.json',cost)
     write(run.path/'resume.json',{**queue,'case_registry_sha256':digest(_registry(run)),'scope_units':list(obligations(run)),

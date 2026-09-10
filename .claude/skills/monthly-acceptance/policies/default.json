@@ -1,5 +1,5 @@
 {
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "当前全景与议题政策；完整查询与业务问题分别计数。旧召回、分类和原因残余字段仅供 3.x 兼容，不决定新议题分母、停止或放行。调整须生成新运行。",
   "levels": [
     0,
@@ -67,7 +67,7 @@
     "max_unexplained_ratio": 0.01,
     "max_unexplained_band_pp": 0.5
   },
-  "page_size": 10000,
+  "page_size": 2000,
   "timeout_seconds": 90,
   "retry_count": 1,
   "amount_tolerance": 0.01,
@@ -76,7 +76,7 @@
   "raw_table": "internal.flywheel.monthly_sales_wide_new",
   "std_table": "internal.flywheel.monthly_sales_with_dim",
   "materiality": {
-    "version": "0.0.1",
+    "version": "0.0.2",
     "basis": "试运行调查续排容差：对完整可复算总体保留1%量额/SPU观察残余与0.5个百分点价格带残余；未经校准为业务误差许可。缺数据、身份不明、关键冲突、历史具体义务不豁免。",
     "scope": "每义务及同国家同类目同月去重累计；量额正负分别",
     "ratio_tolerance": 0.01,
@@ -108,7 +108,7 @@
   },
   "case_workflow": {
     "enabled": true,
-    "version": "0.0.1",
+    "version": "0.0.2",
     "collection_priority_threshold": 0.02,
     "threshold_meaning": "观察变化强度，仅取证排序；不决定放行、错误概率或剩余风险上界",
     "automatic_business_closure": false,
@@ -164,7 +164,7 @@
       "case_workflow.rule_mode",
       "machine_diagnostics"
     ],
-    "shared_contract_versions": "当前运行、政策、问题合同、台账及覆盖协议统一为 0.0.1；历史格式常量仅用于读取旧冻结材料。",
+    "shared_contract_versions": "当前运行、政策、问题合同、台账及覆盖协议统一为 0.0.2；历史格式常量仅用于读取旧冻结材料。",
     "active_workflow": "architecture=panorama_questions；旧配置不能关闭当前议题协议。"
   },
   "architecture": "panorama_questions"

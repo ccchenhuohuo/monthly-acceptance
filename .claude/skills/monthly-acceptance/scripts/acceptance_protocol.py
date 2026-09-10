@@ -1,5 +1,5 @@
 """Current release identity, independent of historical numeric version ordering."""
-VERSION = '0.0.1'
+VERSION = '0.0.2'
 ARCHITECTURE = 'panorama_questions'
 
 

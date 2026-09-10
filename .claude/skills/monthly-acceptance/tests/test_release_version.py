@@ -1,4 +1,4 @@
-"""The 0.0.1 release label must not disable the panorama architecture's gates."""
+"""The current release label must not disable the panorama architecture's gates."""
 from copy import deepcopy
 from types import SimpleNamespace
 import pytest
@@ -14,7 +14,7 @@ import acceptance_review as review
 import acceptance_coverage as coverage
 import acceptance_panorama as panorama
 
-RELEASE='0.0.1'
+from acceptance_protocol import VERSION as RELEASE
 ARCHITECTURE='panorama_questions'
 
 
@@ -147,3 +147,20 @@ def test_unmarked_old_frozen_sql_retains_original_identity(db,manifest,old_versi
     assert not platform_identity(m)
     assert sql_rows(db,m,'fingerprint',entity='std')[0]['spus']==1
     assert job(m,'sample','cn')['key_fields']==['path','product_id']
+
+
+def test_shipped_page_size_fits_the_query_timeout():
+    """A page the transport cannot deliver in time fails every retry identically.
+
+    Measured against the configured Doris MCP on 2026-09-10: returning rows costs
+    7-14 ms each end to end, while Doris itself produces a full 10000-row page of
+    the raw_paths shape in ~1.1s. At page_size 10000 that is 70-140s per call, so
+    the wide-row jobs exhausted both attempts at exactly timeout_seconds and the
+    narrow ones landed at 82.8s -- passing only by luck. Keep a page inside the
+    budget with margin instead of discovering the ceiling mid-run.
+    """
+    policy=read(Path(__file__).resolve().parents[1]/'policies/default.json')
+    worst_case_seconds=policy['page_size']*0.014
+    assert worst_case_seconds<=policy['timeout_seconds']/3,(
+        f"page_size {policy['page_size']} needs ~{worst_case_seconds:.0f}s to transfer "
+        f"against a {policy['timeout_seconds']}s timeout")

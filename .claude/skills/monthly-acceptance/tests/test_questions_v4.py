@@ -91,7 +91,7 @@ def main_review(run,t):
 
 def test_default_protocol_and_no_candidate_debt(v4):
     run,index=v4
-    assert run.manifest['method_version']=='0.0.1'
+    from acceptance_protocol import VERSION;assert run.manifest['method_version']==VERSION
     write(run.path/'candidates.json',[{'candidate_id':str(i),'kind':'result_change'} for i in range(25000)])
     assert inv.expected_obligations(run)==[] and inv.audit(run)['substantive_complete']
     assert not q.validate(run,False)['execution_state']=='complete'  # reading/basic checks still mandatory
@@ -269,3 +269,16 @@ def test_query_after_end_fingerprint_blocks_completion(v4):
         record(run,j,rows_for(run,j));p=run.path/'records'/('job-'+j['job_id']+'.json');v=read(p);v.update(started_at='2020-01-01T00:00:00+00:00',finished_at='2020-01-01T00:00:01+00:00');write(p,v)
     run.event('tool.started',parent_id='late-query')
     assert any('data_query_after_final_fingerprint' in x for x in q.validate(run,False)['errors'])
+
+
+def test_report_states_each_question_once(v4):
+    """没有单独短标题时标题即业务问题；再打一遍，每条发现都以逐字重复开头。"""
+    run,index=v4;question=topic(v4)['business_question'];q.register(run,'main',topic(v4))
+    q.render(run);report=(run.path/'报告.md').read_text()
+    assert '### '+question in report and report.count(question)==1
+
+
+def test_report_keeps_a_distinct_short_title_and_the_question(v4):
+    run,index=v4;v=topic(v4);v['display_title']='两月汇总守恒';q.register(run,'main',v)
+    q.render(run);report=(run.path/'报告.md').read_text()
+    assert '### 两月汇总守恒' in report and report.count(v['business_question'])==1

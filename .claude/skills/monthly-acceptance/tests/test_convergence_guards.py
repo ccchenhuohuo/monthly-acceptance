@@ -221,3 +221,17 @@ def test_aggregate_expectation_bounds_the_remaining_exposure(tmp_path,units,ok):
 def test_unknown_expectation_predicate_is_refused(tmp_path):
     run=regression_run(tmp_path,expect('looks_fine'))
     with pytest.raises(ValueError,match='预期谓词须为'):q.record_baseline_review(run,'main',regression_value(run,REPAIRED,REPAIRED))
+
+
+def test_layer_specific_expectation_keeps_raw_while_std_drops_the_object(tmp_path):
+    """A classification repair: still in raw, gone from the wrong std path."""
+    split={'product_id':'P1','sku_id':'S1',
+           'expectation':{'std':{'predicate':'must_not_exist','basis':'修复后应离开错误标准路径；源层对象继续存在。'}}}
+    raw=[obj(),obj('P1','2024-02')]
+    std=[obj(),obj('OTHER','2024-02')]
+    run=regression_run(tmp_path,split)
+    assert q.record_baseline_review(run,'main',regression_value(run,raw,std))['status']=='passed'
+    # One issue-level predicate cannot express that: applied to raw it is wrong.
+    (tmp_path/'flat').mkdir()
+    flat=regression_run(tmp_path/'flat',expect('must_not_exist'))
+    with pytest.raises(ValueError,match='仍然存在'):q.record_baseline_review(flat,'main',regression_value(flat,raw,std))

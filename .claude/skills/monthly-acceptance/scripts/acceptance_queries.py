@@ -196,7 +196,9 @@ def paginated(j, page_size, offset):
 def drilldown(m, site, path, level, current, lag):
     """Full entity delta population for one cell; head/tail selection happens on complete local rows."""
     pth=path_expr(level);base=shift(current,-lag)
-    return f"""WITH p AS (SELECT month_dt,product_id,MAX(product_title) AS title,MAX(std_brand_name) AS brand,
+    # Amazon sites carry no product_title at all; the same fallback chain as sampling keeps titles readable.
+    title="COALESCE(NULLIF(TRIM(product_title),''),NULLIF(TRIM(product_title_cn),''),NULLIF(TRIM(sku_title),''))"
+    return f"""WITH p AS (SELECT month_dt,product_id,MAX({title}) AS title,MAX(std_brand_name) AS brand,
         MAX(sub_category) AS raw_category,MAX(product_url) AS product_url,COUNT(1) AS nrows,
         SUM(CASE WHEN discount_sales IS NULL OR `count` IS NULL OR discount_sales<0 OR `count`<0 THEN 1 ELSE 0 END) AS invalid_rows,
         SUM(`count`) AS units,SUM(discount_sales) AS amount,MIN(discount_price) AS min_price,MAX(discount_price) AS max_price
@@ -264,8 +266,11 @@ def question_jobs(m,unit,mode='aggregate'):
                 keys=['site','platform','month_dt']
             elif mode=='details':
                 path="CAST(JSON_ARRAY("+','.join('q.'+x for x in (['category_1','category_2','category_3','category_4','category_5','sub_category'] if layer=='raw' else ['stdcategory1','stdcategory2','stdcategory3']))+") AS STRING)"
+                # Amazon sites carry no product_title at all; without the fallback chain
+                # object-level detail returns an unreadable NULL title on US/DE/JP.
+                title="COALESCE(NULLIF(TRIM(q.product_title),''),NULLIF(TRIM(q.product_title_cn),''),NULLIF(TRIM(q.sku_title),''))"
                 sql=f"""SELECT q.site,q.platform,q.month_dt,q.product_id,q.sku_id,{path} AS path,
-                  COUNT(1) AS source_rows,COUNT(DISTINCT q.product_title) AS title_variants,MAX(q.product_title) AS title,
+                  COUNT(1) AS source_rows,COUNT(DISTINCT {title}) AS title_variants,MAX({title}) AS title,
                   SUM(q.`count`) AS units,SUM(q.discount_sales) AS amount,MIN(q.discount_price) AS min_price,MAX(q.discount_price) AS max_price,
                   COUNT(1) OVER() AS total_rows FROM {tbl} q WHERE {cond}
                   GROUP BY q.site,q.platform,q.month_dt,q.product_id,q.sku_id,path"""
