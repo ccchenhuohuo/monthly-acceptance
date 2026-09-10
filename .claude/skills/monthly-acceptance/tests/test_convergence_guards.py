@@ -32,9 +32,18 @@ def test_reading_requires_original_artifact(v4,artifacts):
 def test_reading_artifact_is_bound_without_forcing_blindness(v4,tmp_path):
     run,index=v4;value=reading(v4);p=tmp_path/'reading.md';p.write_text('连续全景原始判读与不同解释。')
     value['reader_artifacts']=[{'path':str(p),'sha256':digest(p.read_bytes())}]
-    q.record_reading(run,'main',value)
+    saved=q.record_reading(run,'main',value)
     assert q.reading_status(run)['complete']==len(index['partitions'])
+    # The bytes are archived inside the run, so the reader's own copy moving or
+    # changing later can no longer make a sealed run unverifiable.
+    stored=run.path/saved['reader_artifacts'][0]['path']
+    assert stored.is_file() and saved['reader_artifacts'][0]['source_path']==str(p)
     p.write_text('改写判读。')
+    assert q.reading_status(run)['complete']==len(index['partitions'])
+    p.unlink()
+    assert q.reading_status(run)['complete']==len(index['partitions'])
+    # Tampering with the archived copy itself still invalidates the reading.
+    stored.write_text('改写判读。')
     with pytest.raises(ValueError,match='审后变更'):q.reading_status(run)
 
 
@@ -159,3 +168,56 @@ def test_history_review_invalidates_when_native_receipt_changes(tmp_path):
     record['expected_rows']=1
     write(run.path/'records'/('job-'+proof['job_id']+'.json'),record)
     with pytest.raises(ValueError):q.record_baseline_review(run,'main',value,_audit=True)
+
+
+def obj(product='P1',month='2024-01',**extra):
+    return {'site':'DE','platform':'Amazon','product_id':product,'sku_id':'S1','month':month,**extra}
+
+
+def expect(predicate,**spec):
+    return {'product_id':'P1','sku_id':'S1',
+            'expectation':{'predicate':predicate,'basis':'台账登记的修复后应然状态。',**spec}}
+
+
+REPAIRED=[obj(),obj('OTHER','2024-02')]
+
+
+def test_repaired_object_must_be_gone_not_still_present(tmp_path):
+    """A classification defect is fixed when the object LEAVES the wrong path."""
+    run=regression_run(tmp_path,expect('must_not_exist'))
+    assert q.record_baseline_review(run,'main',regression_value(run,REPAIRED,REPAIRED))['status']=='passed'
+
+
+@pytest.mark.parametrize('rows_now,message',[
+    ([obj(),obj('P1','2024-02')],'仍然存在'),
+    ([obj()],'不能区分已修复与未观测'),
+    ([obj('OTHER','2024-02')],'不能证明缺陷曾经成立')])
+def test_absence_claims_need_the_defect_to_have_existed_and_the_month_observed(tmp_path,rows_now,message):
+    run=regression_run(tmp_path,expect('must_not_exist'))
+    value=regression_value(run,rows_now,rows_now)
+    with pytest.raises(ValueError,match=message):q.record_baseline_review(run,'main',value)
+
+
+@pytest.mark.parametrize('now,ok',[('["配件类","相机配件","镜头盖"]',True),('["配件类","相机配件","相机滤镜"]',False)])
+def test_property_expectation_checks_the_corrected_value(tmp_path,now,ok):
+    run=regression_run(tmp_path,expect('property',field='path',comparison='eq',value='["配件类","相机配件","镜头盖"]'))
+    rows_now=[obj(path='["配件类","相机配件","相机滤镜"]'),obj('P1','2024-02',path=now)]
+    value=regression_value(run,rows_now,rows_now)
+    if ok:assert q.record_baseline_review(run,'main',value)['status']=='passed'
+    else:
+        with pytest.raises(ValueError,match='属性未达成回归预期'):q.record_baseline_review(run,'main',value)
+
+
+@pytest.mark.parametrize('units,ok',[(0,True),(5,False)])
+def test_aggregate_expectation_bounds_the_remaining_exposure(tmp_path,units,ok):
+    run=regression_run(tmp_path,expect('aggregate',field='units',comparison='le',value=0))
+    rows_now=[obj(units=10),obj('P1','2024-02',units=units)]
+    value=regression_value(run,rows_now,rows_now)
+    if ok:assert q.record_baseline_review(run,'main',value)['status']=='passed'
+    else:
+        with pytest.raises(ValueError,match='聚合预期未达成'):q.record_baseline_review(run,'main',value)
+
+
+def test_unknown_expectation_predicate_is_refused(tmp_path):
+    run=regression_run(tmp_path,expect('looks_fine'))
+    with pytest.raises(ValueError,match='预期谓词须为'):q.record_baseline_review(run,'main',regression_value(run,REPAIRED,REPAIRED))

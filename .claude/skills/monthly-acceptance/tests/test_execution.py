@@ -18,13 +18,21 @@ def rows_for(run,j):
     f=j['family'];path=json.dumps(['a','b','c'][:j.get('level',0)],ensure_ascii=False,separators=(',',':'))
     if j.get('year'):ms=[m for m in ms if int(m[:4])==j['year']]
     if f=='release':return [{'release_id':'r1','status':'published'}]
+    if f=='delivery':return [{'table_schema':'flywheel','table_name':t,'update_time':'2026-01-01T00:00:00','table_rows':100}
+                             for t in ('monthly_sales_wide_new','monthly_sales_with_dim')]
     if f=='sample':return [{**({'platform':'Amazon'} if 'platform' in j['key_fields'] else {}),'path':'["a","b","c"]','product_id':'p1','title':'Example camera accessory','brand':'Example','raw_category':'Electronics','units':10,'amount':100}]
     result=[]
     for mm in ms:
         base={'month_dt':mm+'-01'}
         if f=='fingerprint':base.update(nrows=1,spus=1,units=10,amount=100,invalid_keys=0,invalid_rows=0)
-        if f=='category':base.update(path=path,nrows=1,spus=1,units=10,amount=100,invalid_rows=0,missing_product_rows=0,priced_spus=1,p10=10,p50=10,p90=10)
-        if f=='bands':base.update(path=path,band=1,spus=1,units=10,amount=100)
+        pol=getattr(run,'policy',None) or getattr(run,'manifest',{}).get('policy',{})
+        multi=len(pol.get('expected_platforms',{}).get(j['site'],[]))>1
+        if f=='category':base.update(path=path,nrows=1,spus=2 if multi else 1,units=10,amount=100,invalid_rows=0,missing_product_rows=0,priced_spus=1,p10=10,p50=10,p90=10)
+        if f=='category_platform':
+            result += [{**base,'path':path,'platform':pl,'spus':1,'units':units,'amount':amount,'nrows':1,'invalid_rows':0}
+                       for pl,units,amount in (('Taobao',6,60),('Tmall',4,40))]
+            continue
+        if f=='bands':base.update(path=path,band=1,spus=2 if multi else 1,units=10,amount=100)
         if f=='movement':base.update(path=path,base_entities=1,current_entities=1,entered=0,exited=0,base_amount=100,current_amount=100,base_units=10,current_units=10,positive_amount=0,negative_amount=0,positive_units=0,negative_units=0)
         if f=='raw_paths':base.update(path='["Electronics"]',spus=1,nrows=1,units=10,amount=100)
         if f=='mapping':base.update(raw_duplicate_rows=0,std_duplicate_rows=0,raw_only_keys=0,std_only_keys=0,matched_keys=1,value_mismatch_keys=0)

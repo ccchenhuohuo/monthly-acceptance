@@ -7,6 +7,7 @@ KEYS = {
     'bands': ['month_dt','path','band'], 'movement': ['month_dt','path'],
     'raw_paths': ['month_dt','path'], 'mapping': ['month_dt'],
     'platform': ['month_dt','platform'], 'sample': ['path','product_id'], 'release': ['release_id'],
+    'delivery': ['table_schema','table_name'], 'category_platform': ['month_dt','path','platform'],
 }
 
 
@@ -57,6 +58,15 @@ def query(m, family, site, level=None, lag=None, entity=None, year=None, phase=N
     spu=spu_identity() if platform_identity(m) else 'product_id'
     if family=='release':
         return 'SELECT release_id,status,built_at,published_at,max_complete_month,scope_version,pipeline_version,source_wide_update_time,upstream_dim_update_time,source_derived_update_time,COUNT(1) OVER() AS total_rows FROM internal.flywheel_gov.gov_release'
+    if family=='delivery':
+        # First-hand delivery identity of the exact tables this run reads. Country
+        # fingerprints cannot see a rebuild that only recomposes categories, so the
+        # upstream table's own update time brackets the run independently.
+        pairs=sorted({(t.split('.')[-2],t.split('.')[-1]) for t in (pol['raw_table'],pol['std_table'])})
+        where_clause=' OR '.join(f'(TABLE_SCHEMA={quoted(sc)} AND TABLE_NAME={quoted(tn)})' for sc,tn in pairs)
+        return ('SELECT TABLE_SCHEMA AS table_schema,TABLE_NAME AS table_name,UPDATE_TIME AS update_time,'
+                'TABLE_ROWS AS table_rows,COUNT(1) OVER() AS total_rows '
+                f'FROM internal.information_schema.tables WHERE {where_clause}')
     if family=='fingerprint':
         tbl=pol['raw_table'] if entity=='raw' else tbl
         return f"""SELECT month_dt,COUNT(1) AS nrows,COUNT(DISTINCT {spu}) AS spus,
@@ -81,6 +91,12 @@ def query(m, family, site, level=None, lag=None, entity=None, year=None, phase=N
             COUNT(price) AS priced_spus,SUM(CASE WHEN entity IS NULL THEN nrows ELSE 0 END) AS missing_product_rows,
             PERCENTILE_APPROX(price,0.1) AS p10,PERCENTILE_APPROX(price,0.5) AS p50,PERCENTILE_APPROX(price,0.9) AS p90,
             COUNT(1) OVER() AS total_rows FROM v GROUP BY month_dt,path"""
+    if family=='category_platform':
+        # Same CTE, one more grouping key. A defect confined to one platform is
+        # invisible in a site-level category aggregate on a multi-platform site.
+        return f"""WITH {priced(m,site,level)} SELECT month_dt,path,platform,COUNT(entity) AS spus,
+            SUM(amount) AS amount,SUM(units) AS units,SUM(nrows) AS nrows,SUM(invalid_rows) AS invalid_rows,
+            COUNT(1) OVER() AS total_rows FROM v GROUP BY month_dt,path,platform"""
     if family=='bands':
         return f"""WITH {priced(m,site,level)} SELECT month_dt,path,{band_expr(pol['price_bands'][site])} AS band,
             COUNT(entity) AS spus,SUM(amount) AS amount,SUM(units) AS units,COUNT(1) OVER() AS total_rows
@@ -151,6 +167,7 @@ def job(m, family, site, **params):
 
 def plan(m, end_fingerprints=False):
     jobs=[] if end_fingerprints else [job(m,'release','global')]
+    if current(m):jobs.append(job(m,'delivery','global',phase='end' if end_fingerprints else 'start'))
     for site in m['sites']:
         for entity in ['raw','std']:
             jobs.append(job(m,'fingerprint',site,entity=entity,phase='end' if end_fingerprints else 'start'))
@@ -162,6 +179,8 @@ def plan(m, end_fingerprints=False):
         for year in years:jobs.append(job(m,'mapping',site,year=year))
         for level in m['policy']['levels']:
             jobs += [job(m,'category',site,level=level),job(m,'bands',site,level=level)]
+            if current(m) and len(m['policy'].get('expected_platforms',{}).get(site,[]))>1:
+                jobs.append(job(m,'category_platform',site,level=level))
             for lag in m['policy']['comparisons'].values():
                 for year in years:
                     for entity in ['spu','brand']:

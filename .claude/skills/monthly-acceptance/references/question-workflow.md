@@ -5,7 +5,7 @@
 当前发布、运行、政策、协议、台账与抽样数据格式版本统一为 `0.0.1`；使用显式 `architecture="panorama_questions"` 识别当前全景与议题架构。旧版本号仅用于旧冻结运行的兼容分支，不作为当前架构的版本门槛。
 
 - `coverage-plan.json`：从冻结配置/预期平台/完整查询生成的检查分母。`panorama/index.json` 绑定完整查询及全部派生事实，具体约束具有独立 passed/failed/unavailable/not_applicable 状态。
-- `panorama/facts-*.json`：连续的全部标准路径×自然月，含无观测，保留价格带、SPU/品牌进入退出和正负贡献。raw-paths、platforms、country-layers 保留完整上下文及原始行定位。读取 JSON 的全量路径/月份分区，不只看排序结果。
+- `panorama/facts-*.json`：连续的全部标准路径×自然月，含无观测，保留价格带、SPU/品牌进入退出和正负贡献。多平台国家（当前仅中国淘系）每个事实另带 `platform_split` 逐平台量额，并有 `platform_split_conservation` 校验各平台之和等于该国类目合计——只塌在单一平台上的缺陷不会再被国家级类目汇总稀释。raw-paths、platforms、country-layers 保留完整上下文及原始行定位。读取 JSON 的全量路径/月份分区，不只看排序结果。
 - `panorama/readings`：实际阅读者的判断、读法、未读范围、独立性和原始产物绑定。生成文件或统计行数本身不算理解。
 - `investigations/cases/state.json`：唯一业务议题主台账，沿用不可变版本和分块存储。一个 case 有多个 scope_units。没有并行的 question/ticket 主台账。
 - `investigations/plan.json` 冻结协调身份与资源政策。调查义务动态重建自现行议题，每个范围为 `question_scope:<case_id>:<scope_unit_id>`，不从 candidates/samples 反推。
@@ -58,7 +58,7 @@
 
 ## 判读与历史冻结
 
-`panorama-read RUN --actor READER --file reading.json` 字段：binding_sha256、partition_ids、status（complete/partial）、judgment、read_method、unread_scope（完整时为 none）、independence_disclosure、source_refs、reader_artifacts（path/sha256）。实际使用分区完整轨迹和原始文件；机器不能验证读者是否理解。
+`panorama-read RUN --actor READER --file reading.json` 字段：binding_sha256、partition_ids、status（complete/partial）、judgment、read_method、unread_scope（完整时为 none）、independence_disclosure、source_refs、reader_artifacts（path/sha256）。实际使用分区完整轨迹和原始文件；机器不能验证读者是否理解。登记时把 reader_artifacts 的字节复制进 `panorama/readings/artifacts/`，记录改写为运行内相对路径并保留 `source_path`；此后读者本地文件被移动或改写都不再影响已封存运行，但篡改运行内的归档副本仍使该次阅读失效。
 
 `independent-freeze --file discovery.json` 至少提供 independence_disclosure。确未读取历史答案时才使用 `--history-blind`。随后 history-plan/sampling-plan；晚揭露的真实缺陷回归可增加议题，但必须把独立发现与历史引导分开计数。
 
@@ -89,10 +89,10 @@ raw 的同月 std 子树 EXISTS 只证明已承接集合，不能证明退出对
 - quality_result：ruled_out / confirmed_defect / blocked_external。未回答完的质量问题保存 progress，不作为完成答卷。
 - checks：逐 required_checks 的 status、finding、counterevidence、actions、evidence_ids、raw_locators。not_applicable 必须具体有据；scope/counterevidence/impact 不可豁免。
 - proof_jobs：每页的 evidence_id、job_id、record_sha256。程序核对实际来源、完整分页、SQL、国家/平台/层/月/路径覆盖。deep_review 的事件必须有完整 cohort 或明细，只有旧触发聚合不能完成。
-- raw_locator：evidence_id、pointer（如 /response/data/0）、record_sha256、fields、object_keys、purpose。须对回实际原始行；不是把自己写的摘要当查询。
+- raw_locator：evidence_id、pointer（必须指向实际结果行 `/response/data/<n>`）、record_sha256、fields、object_keys、purpose、scope_role。须对回实际原始行；不是把自己写的摘要当查询。`scope_role=target` 的行必须落在本问题的国家/平台/月份/数据层/路径范围内；范围由原查询语义推出，不采信定位自称。`context`/`counterevidence`/`destination` 用于背景、反证与去向，必须写 `scope_relation` 说明与目标的关系，且不得计入目标影响。
 - component_responses：每个 required_component 的精确回应、raw_locators 和非空 calculation_ids；主审须核对这些计算是否实际回答该分量。
-- calculations：每项 calculation_id、method、operands（locator 与 field）、result、meaning。sum/sum_abs/max/difference/ratio/distinct_count 等由程序重算；未知分母不写 0%/100%。
-- metric_impacts：spus/bands/units/amount 分别给 state、basis。合同 impact_metrics 中的适用指标用 measured + calculation_ids（对应 calculation.metric 必须相同），或确有受阻的 unknown + missing；其余明确 not_applicable 的边界。默认适用 SPU/销量/金额，价格疑问增加 bands。
+- calculations：每项 calculation_id、method、operands（locator 与 field）、result、meaning、scope_role（target/context）。sum/sum_abs/max/difference/ratio/distinct_count 等由程序重算；未知分母不写 0%/100%。`target` 的全部操作数必须在问题范围内；`context` 须写 `scope_relation`，只用于比较，不能被 metric_impacts 或 quality_impact 引用。
+- metric_impacts：spus/bands/units/amount 分别给 state、basis。合同 impact_metrics 中的适用指标用 measured + calculation_ids（对应 calculation.metric 必须相同），或确有受阻的 unknown + missing；其余明确 not_applicable 的边界。measured 只接受 `scope_role=target` 的复算。默认适用 SPU/销量/金额，价格疑问增加 bands。
 - quality_impact：observation_change、proven_error、unresolved_quality_risk，分别说明 finding、scope、calculation_ids。错误不成立不能把市场变化当错误金额；普通变化不能充当未解决质量风险。
 - conclusion、next_action、stop_rationale：针对原质量疑问，不以耗时/预算/数量目标为停止依据。
 
@@ -107,10 +107,13 @@ blocked_external 的每个受阻动作必须指明 type、required_record、prov
 baseline-review 使用既有覆盖来源，明确 check_id、不同 investigator_id/reviewer_id、status、finding/action/counterevidence、evidence_ids/raw_locators。程序绑定全部引用材料的哈希，审后重验。
 
 - 抽查从全体适用 L3 单元按原种子和国家×月分层。确定样本必须全部核对原始复合键；失败扩展同国检查总体，并绑定覆盖实际范围的议题，不生成全体 SKU 深查义务。
+- 历史回归可在台账条目上写 `expectation`：`must_exist`（默认，维持原口径）、`must_not_exist`（修复后对象应当离开原位置）、`property`（字段须达到 field/comparison/value）、`aggregate`（匹配对象的字段合计须满足比较）。缺失与属性类预期按**完整查询结果**判定而非引用行：该月完整查询无任何结果时只能保留 unavailable（不能区分已修复与未观测），并且仍须在原时期给出原始对象以证明缺陷曾经成立。
 - 历史来源逐段清点；必要回归核具体原始对象、原月份和新月份、raw/std。历史 `passed` 需分别提供 `raw_object_locators / std_object_locators` 和 `raw_proof_jobs / std_proof_jobs`；后两者逐页使用 `evidence_id / job_id / record_sha256` 绑定原生执行、不可变计划与完整分页。对象定位必须属于对应层的已验证查询。单值、多值 ID 或 `sku_keys` 均须还原国家/平台/父体/必要 SKU；历史时期或复合身份不明确时保留 unavailable。自报 verified_object_ids、附件自报 SQL 或只修展示不授予回归信用。纯语义事项以有出处的辅助处置保留，不设语义正确性测试。
-- 内部对账需要真实冻结内部数据及双方复算。发布元数据不能替代实际对象量额承接。缺输入如实 unavailable；不能把缺证写成不适用。
-- 明确失败有实际范围归属；如果已完成证据调查并打回，检查失败可有完成的处置，业务仍 reject。未核或受阻不记 verified。
+- 内部对账需要真实冻结内部数据及双方复算，并且应当声明 `reconciliation_contract`：left/right 各自的 source/grain/period/unit、match_keys、tolerance、difference（绑定实际复算并与其结果一致）与 unmatched（未匹配行数，非零时须给金额规模和具体说明）。**两方 grain/period/unit 不一致即判不可比**——复算只证明算术，从不证明两边可比；差异超出所声明容差不能记通过。契约整体缺失不阻断记录，但会作为 limitation 落在覆盖里，本次不构成无保留通过；契约一旦写了就必须自洽，不自洽仍是硬错误。发布元数据不能替代实际对象量额承接。缺输入如实 unavailable；不能把缺证写成不适用。
+- 明确失败按其**完整适用范围**归属：约束未写平台/层时代表该国全部冻结平台与适用数据层，未写路径代表全站；缺失维度是完整集合，不是任意一个成员。一个 scope_unit 只认领它实际覆盖的格子，其余格子须由别的议题补齐，多个 scope_units 的并集可共同认领；`failure_scope_coverage` 逐约束列出 required/covered/missing_cells。如果已完成证据调查并打回，检查失败可有完成的处置，业务仍 reject。未核或受阻不记 verified。
 
-validate / seal 重建：冻结输入与计划、全查询完整性、所有约束及失败归属、实际阅读、样本/历史/内部/发布检查、有效问题主审、复用来源、原始证据版本、末次指纹以及父/子包之后无新查询、报告对所有议题的承接。
+validate / seal 重建：冻结输入与计划、全查询完整性、所有约束及失败归属、实际阅读、样本/历史/内部/发布检查、有效问题主审、复用来源、原始证据版本、末次指纹以及父/子包之后无新查询、报告对所有议题的承接。另有 `delivery` 交付身份首尾括住整个运行：直接读所查两张表自身的 `UPDATE_TIME`，运行期间上游任何重建都会报 `delivery_rebuilt_during_run`——国家指纹看不见只改类目归属、不动国家总量的重组，交付身份看得见。业务结论由唯一聚合函数产生：存在执行错误、不可用限制或任何 undetermined 时整体 undetermined；有 reject 即 reject；有 qualified 即 qualified；只有无错误、无限制、无未决且实际具备无保留验收资格时才是 pass。执行完成（execution_state）不等于业务无保留通过。
+
+报告 finding 的 `quantities` 逐条给 obligation_id、metric、calculation_id、value、statement：**报告里的数字必须就是已审的那个目标复算**，量纲、归属范围和数值都要对上，背景计算不能引用；反过来，答卷中每个 `measured` 的指标都应在报告里按原复算列出：**写错**（数值、量纲、范围对不上，或引用背景计算）是硬错误；**漏写**记为 limitation，不阻断执行，但同样使结论落到 undetermined。
 
 零议题允许，但这些门槛仍必须完成。业务报告分列查询/事实/判读/议题/独立范围/任务/有效主审/待查与成本，不把普通观察显示为待调查债务，也不声称未立案就已证明正常。

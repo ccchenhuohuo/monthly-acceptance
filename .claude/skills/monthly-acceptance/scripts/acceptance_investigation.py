@@ -835,7 +835,7 @@ def audit(run, content=None):
 
 def _audit(run, content, snapshot):
     """Non-mutating audit. A queued/blocked obligation never contributes to verified."""
-    errors = []; rows = {}; tasks = {}; states = {}; findings = {}; obligations = {}; dimensions = {}
+    errors = []; limitations = []; rows = {}; tasks = {}; states = {}; findings = {}; obligations = {}; dimensions = {}
     try:
         snapshot.pin_run(run)
         p = plan_data(run); obligations = all_obligations(run, p); tasks = task_records(run)
@@ -904,6 +904,11 @@ def _audit(run, content, snapshot):
                 coverage.add(oid)
         missing = set(findings) - coverage
         if missing: errors.append('已主审结论/阻塞未进入报告：' + str(len(missing)))
+        import acceptance_questions as questions
+        if questions.enabled(run):
+            # A figure no calculation backs is a false claim; an omitted one is a gap.
+            wrong, omitted = questions.report_quantities(run, content, findings)
+            errors.extend(wrong); limitations.extend(omitted)
     total = len(obligations); applicable = total-len(deferred)
     for oid in obligations:
         if oid not in dimensions:
@@ -928,10 +933,10 @@ def _audit(run, content, snapshot):
                                               for entry in t.get('residual_followup_records', {}).values()),
             'substantive_complete': not errors and (total > 0 or run.policy.get('question_workflow',{}).get('enabled')) and counts.get('verified', 0) + counts.get('reviewed_residual', 0) == total,
             **({'state_dimensions': {key: dict(Counter(v[key] for v in dimensions.values())) for key in substantive.DIMENSIONS},
-                'unreserved_acceptance_eligible': not errors and (total > 0 or run.policy.get('question_workflow',{}).get('enabled')) and counts.get('verified', 0) == total
+                'unreserved_acceptance_eligible': not errors and not limitations and (total > 0 or run.policy.get('question_workflow',{}).get('enabled')) and counts.get('verified', 0) == total
                     and all(a['business_verdict'] == 'pass' for a in findings.values()),
                 'machine_review_boundary': '程序核对范围、对象字段、版本、复算及职责；不能验证Agent是否真正理解，或仅凭相关性建立因果。'} if substantive.enabled(run) else {}),
-            'errors': errors, 'report_covered': len(coverage),
+            'errors': errors, 'limitations': limitations, 'report_covered': len(coverage),
             'business_verdicts': dict(Counter(a['business_verdict'] for a in findings.values())),
             **({'deferred': len(deferred), 'applicable_investigation_obligations': applicable,
                 'applicable_investigation_complete': not errors and (total > 0 or run.policy.get('question_workflow',{}).get('enabled')) and counts.get('verified', 0)+counts.get('reviewed_residual', 0) == applicable,

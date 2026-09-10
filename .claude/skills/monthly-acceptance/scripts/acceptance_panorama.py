@@ -72,6 +72,7 @@ def _constraint(kind,site,mm,scope,refs,facts,state='passed',family=None):
 def derive(run,jobs,data,receipts):
     """Pure fact/constraint derivation. Never reads candidates.json."""
     cats={}; bands=defaultdict(list); movement={}; raw={}; fp={}; mapping={}; platform={}; checks=[]
+    split=defaultdict(list)
     by_family=defaultdict(list)
     for j in jobs:
         jid=j['job_id'];by_family[(j['site'],j['family'])].append(jid)
@@ -85,6 +86,7 @@ def derive(run,jobs,data,receipts):
             elif family=='fingerprint':fp[(site,j['entity'],mm)]=(row,ref)
             elif family=='mapping':mapping[(site,mm)]=(row,ref)
             elif family=='platform':platform[(site,j['entity'],str(row.get('platform')),mm)]=(row,ref)
+            elif family=='category_platform':split[(site,canonical(_p(row['path'])),mm)].append((row,ref))
     children=defaultdict(list); movement_refs=defaultdict(set)
     for (site,path,mm),v in cats.items():
         parts=_p(path)
@@ -117,11 +119,16 @@ def derive(run,jobs,data,receipts):
                 movements={str(lag)+':'+entity:movement[(site,path,mm,lag,entity)][0]
                     for lag in run.policy['comparisons'].values() for entity in ('spu','brand')
                     if (site,path,mm,lag,entity) in movement and shift(mm,-lag)>=run.manifest['starts'][site]}
+                parts=split.get((site,path,mm),[])
                 fact={'site':site,'path':_p(path),'level':len(_p(path)),'month':mm,
                     'observation':'observed' if r else 'unobserved','values':r,
+                    # Present inline so a reader sees a single-platform collapse
+                    # without opening another file; empty on single-platform sites.
+                    'platform_split':{str(x[0].get('platform')):x[0] for x in parts},
                     'bands':[x[0] for x in bands.get((site,path,mm),[])], 'movements':movements,
                     'source':pair[1] if pair else None,
                     'source_jobs':sorted({x[1]['job_id'] for x in bands.get((site,path,mm),[])}|
+                        {x[1]['job_id'] for x in parts}|
                         ({pair[1]['job_id']} if pair else set())|
                         movement_refs[(site,path,mm)])}
                 facts.append(fact)
@@ -135,6 +142,13 @@ def derive(run,jobs,data,receipts):
                 checks.append(_constraint('band_conservation',site,mm,{'path':_p(path)},fact['source_jobs'],
                     {'category':{k:r.get(k) for k in sums},'band_sum':sums},
                     'unavailable' if not complete else 'passed' if all((_close(sums[k],r.get(k)) if k=='amount' else sums[k]==r.get(k)) for k in sums) else 'failed'))
+                if parts:
+                    sums={k:sum(float(x[0][k]) for x in parts if x[0].get(k) is not None) for k in ('spus','units','amount')}
+                    whole=all(x[0].get(k) is not None for x in parts for k in ('spus','units','amount'))
+                    checks.append(_constraint('platform_split_conservation',site,mm,{'path':_p(path)},
+                        fact['source_jobs'],{'category':{k:r.get(k) for k in sums},'platform_sum':sums},
+                        'unavailable' if not whole else 'passed' if all((_close(sums[k],r.get(k)) if k=='amount' else sums[k]==r.get(k)) for k in sums) else 'failed',
+                        family='conservation'))
                 child=children[(site,path,mm)]
                 if len(_p(path))<3:
                     sums={k:sum(float(x[0][k]) for x in child if x[0].get(k) is not None) for k in ('units','amount')}

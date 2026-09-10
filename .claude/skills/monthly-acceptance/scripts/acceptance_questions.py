@@ -13,6 +13,7 @@ from acceptance_core import Run, canonical, digest, now, read, write, months, mo
 import acceptance_panorama as panorama
 import acceptance_review as review
 from acceptance_protocol import protocol
+from acceptance_scope import constraint_coverage, row_scope, evidence_within
 
 enabled=panorama.enabled
 FAMILIES=panorama.FAMILIES
@@ -101,18 +102,9 @@ def _unit(run,u):
     return u
 
 
-def _owns_constraint(u,c):
-    if u['site']!=c['site'] or c['month'] not in u['months'] or c['family'] not in u['required_checks']:return False
-    scope=c['scope'];layer=scope.get('layer')
-    if layer and layer not in u['source_layers']:return False
-    if scope.get('platform') and scope['platform'] not in u['platforms']:return False
-    path=scope.get('path',scope.get('path_prefix'))
-    if path is None:return u['paths']==[[]] or c['rule']=='contract' and 'contract_id' in scope
-    required_layer='raw' if 'path_prefix' in scope else 'std'
-    if required_layer not in u['source_layers']:return False
-    if u['paths']==[[]]:return True
-    if u['path_layer']!=required_layer:return False
-    return any(path[:len(p)]==p for p in u['paths'])
+def _owns_constraint(run,u,c):
+    required,covered=constraint_coverage(run,c,[u])
+    return required==covered
 
 
 def register(run,actor,value,*,_index=None,_rows=None):
@@ -137,7 +129,8 @@ def register(run,actor,value,*,_index=None,_rows=None):
     for cid in constraint_ids:
         c=constraints.get(cid)
         if not c or c['state']!='failed':raise ValueError('起因约束不是当前明确失败')
-        if not any(_owns_constraint(u,c) for u in units):raise ValueError('明确失败缺少同范围、同约束的核查')
+        _,covered=constraint_coverage(run,c,units)
+        if not covered:raise ValueError('明确失败缺少同范围、同约束的核查')
     cid=v.get('case_id') or 'case-'+digest([run.manifest['run_id'],v['business_question'],units])[:24]
     old=next((c for c in state['cases'] if c['case_id']==cid),None)
     if old:
@@ -200,10 +193,21 @@ def record_reading(run,actor,value):
     refs=_list(v.get('source_refs'),'关键原始定位')
     for ref in refs:panorama.resolve(run,ref)
     files=_list(v.get('reader_artifacts'),'判读原始产物')
+    archive=run.path/'panorama/readings/artifacts'
     for f in files:
-        p=Path(f['path']).resolve()
-        if not p.is_file() or digest(p.read_bytes())!=f['sha256']:raise ValueError('判读原始记录缺失或变更')
-    payload={**v,'reader_id':actor,'recorded_at':now()};rid=digest(payload)
+        p=Path(f['path'])
+        source=p if p.is_absolute() else run.path/p
+        if not source.is_file():raise ValueError('判读原始记录缺失或变更')
+        data=source.read_bytes()
+        if digest(data)!=f['sha256']:raise ValueError('判读原始记录缺失或变更')
+        # Archive the bytes inside the run: a reader's own file can be moved or
+        # edited later, and a sealed run must stay verifiable without it.
+        stored=archive/(f['sha256']+source.suffix)
+        if not stored.exists():
+            archive.mkdir(parents=True,exist_ok=True)
+            tmp=stored.with_name(stored.name+'.tmp');tmp.write_bytes(data);tmp.replace(stored)
+        f.update(path=str(stored.relative_to(run.path)),source_path=str(source),original_name=source.name)
+    payload={**v,'reader_artifacts':files,'reader_id':actor,'recorded_at':now()};rid=digest(payload)
     write(run.path/'panorama/readings'/(rid+'.json'),payload)
     run.event('panorama.reading.saved',reading_id=rid,sha256=digest(payload),reader_id=actor,partition_ids=ids)
     return payload
@@ -216,6 +220,8 @@ def reading_status(run,index=None):
         if digest(v)!=e['sha256']:raise ValueError('阅读记录变更')
         for f in _list(v.get('reader_artifacts'),'判读原始产物'):
             p=Path(f['path'])
+            # Runs frozen before artifacts were archived keep their absolute paths.
+            p=p if p.is_absolute() else run.path/p
             if not p.is_file() or digest(p.read_bytes())!=f['sha256']:raise ValueError('判读材料审后变更')
         if v['binding_sha256']==index['binding_sha256']:
             for pid in v['partition_ids']:current[pid]=v
@@ -233,7 +239,7 @@ def _proof_jobs(run,answer,lookup):
 def _verified_query_proofs(run,proofs,lookup,site,*,native_only=False):
     """Check full typed query receipts, including inherited/imported evidence."""
     from acceptance_validate import verify_job
-    ids=set();receipts=[];checked_jobs=[];groups={}
+    ids={};receipts=[];checked_jobs=[];groups={}
     for item in _list(proofs,'完整查询证明'):
         eid=item['evidence_id'];owner,original,meta,value=review._receipt_origin(run,lookup,eid)
         key=(owner.path,item['job_id'])
@@ -273,7 +279,8 @@ def _verified_query_proofs(run,proofs,lookup,site,*,native_only=False):
         if provided!=expected:raise ValueError('完整查询证明遗漏分页')
         checked_jobs.append((owner,job))
         for item,_,_ in members:
-            ids.add(item['evidence_id']);receipts.append({'job_id':jid,'owner':str(owner.path),'record_sha256':record_hash,'sql_hash':record['sql_hash']})
+            ids[item['evidence_id']]={'job':job,'platforms':owner.policy.get('expected_platforms',{}).get(site) or run.policy.get('expected_platforms',{}).get(site,[])}
+            receipts.append({'job_id':jid,'owner':str(owner.path),'record_sha256':record_hash,'sql_hash':record['sql_hash']})
     return ids,receipts,checked_jobs
 
 
@@ -321,12 +328,18 @@ def _verify_scope_coverage(run,answer,checked_jobs):
         if event-direct:raise ValueError('深查事件缺完整身份群体或明细证据，只有全景触发不能完成')
 
 
-def _locator(lookup,link,allowed,scope):
+def _locator(lookup,link,allowed,scope,*,require_target=False):
     if link['evidence_id'] not in allowed:raise ValueError('原始定位未属于已核验完整查询')
+    if not re.fullmatch(r'/response/data/\d+',link.get('pointer','')):raise ValueError('查询定位必须指向实际结果行')
     row=review.locator(lookup,link)
-    mm=row.get('month_dt',row.get('month'))
-    if mm and str(mm)[:7] not in scope['months']:raise ValueError('引用月份不属于问题或背景')
-    if row.get('site') and row['site']!=scope['site']:raise ValueError('跨国证据不能替本范围作结论')
+    role=link.get('scope_role','target')
+    if role not in ('target','context','counterevidence','destination'):raise ValueError('证据用途必须区分目标与背景/反证/去向')
+    actual=row_scope(allowed[link['evidence_id']],row)
+    if role=='target':
+        if not evidence_within(actual,scope):raise ValueError('目标证据超出问题国家/平台/月份/数据层/路径范围')
+    else:
+        _text(link.get('scope_relation'),'跨范围证据与目标的关系')
+        if require_target:raise ValueError('背景、去向或反证不能计入目标影响')
     return row
 
 
@@ -342,7 +355,7 @@ def verify_answer(run,ob,answer,lookup):
         if item.get('status') not in ('verified','blocked_external','not_applicable'):raise ValueError('调查未回答的质量缺口必须继续，不可作为完成提交')
         for k in ('finding','counterevidence'):_text(item.get(k),name+'.'+k)
         _list(item.get('actions'),'实际动作');_list(item.get('evidence_ids'),'证据')
-        if not set(item['evidence_ids'])<=allowed:raise ValueError('核查证据不属于完整查询')
+        if not set(item['evidence_ids'])<=set(allowed):raise ValueError('核查证据不属于完整查询')
         links=_list(item.get('raw_locators'),'原始字段核对')
         for link in links:_locator(lookup,link,allowed,ob['scope'])
         if item['status']=='not_applicable':
@@ -364,9 +377,13 @@ def verify_answer(run,ob,answer,lookup):
     calculations=answer.get('calculations',[])
     _list([c.get('calculation_id') for c in calculations],'关键计算')
     for calc in calculations:
-        for operand in calc.get('operands',[]):_locator(lookup,operand['locator'],allowed,ob['scope'])
+        role=calc.get('scope_role','target')
+        if role not in ('target','context'):raise ValueError('计算用途必须区分目标影响与背景比较')
+        if role=='context':_text(calc.get('scope_relation'),'背景计算与问题的关系')
+        for operand in calc.get('operands',[]):_locator(lookup,operand['locator'],allowed,ob['scope'],require_target=role=='target')
         review.recompute(lookup,calc,None)
     calcs={c['calculation_id'] for c in calculations}
+    target_calcs={c['calculation_id'] for c in calculations if c.get('scope_role','target')=='target'}
     metrics=answer.get('metric_impacts',{})
     if set(metrics)!={'spus','bands','units','amount'}:raise ValueError('四指标分别交代可量化范围或不适用原因')
     for metric,item in metrics.items():
@@ -376,6 +393,7 @@ def verify_answer(run,ob,answer,lookup):
             elif item.get('state')=='measured':
                 ids=_list(item.get('calculation_ids'),'指标实际复算')
                 if not set(ids)<=calcs:raise ValueError('指标引用不存在的复算')
+                if not set(ids)<=target_calcs:raise ValueError('背景计算不能计入目标指标影响')
                 for ident in ids:
                     calc=next(c for c in calculations if c['calculation_id']==ident)
                     if calc.get('metric')!=metric:raise ValueError('指标与复算量纲不一致')
@@ -389,6 +407,7 @@ def verify_answer(run,ob,answer,lookup):
     for key,item in impacts.items():
         _text(item.get('finding'),key);_text(item.get('scope'),key+'范围')
         if not set(item.get('calculation_ids',[]))<=calcs:raise ValueError('影响引用未知计算')
+        if not set(item.get('calculation_ids',[]))<=target_calcs:raise ValueError('背景计算不能计入目标质量影响')
     if not impacts['observation_change'].get('calculation_ids'):raise ValueError('观察影响须绑定原始复算')
     if answer.get('quality_result') not in ('ruled_out','confirmed_defect','blocked_external'):raise ValueError('未回答质量疑问须继续；普通波动无市场原因不构成欠账')
     if (answer['quality_result']=='blocked_external')!=blocked:raise ValueError('缺证状态不一致')
@@ -554,7 +573,52 @@ def _regression_objects(run,issue):
     return targets
 
 
-def _verify_regression_layer(run,issue,rows):
+PREDICATES=('must_exist','must_not_exist','property','aggregate')
+COMPARISONS={'eq':lambda a,b:a==b,'ne':lambda a,b:a!=b,'lt':lambda a,b:a<b,
+             'le':lambda a,b:a<=b,'gt':lambda a,b:a>b,'ge':lambda a,b:a>=b}
+
+
+def _regression_expectation(issue):
+    """A repaired defect often means the object must be GONE, not still present.
+
+    Absent an explicit expectation the historical rule stays exactly as before:
+    the object must still be observable in every historical month and the current
+    month. Issues that expect removal or a corrected value say so themselves.
+    """
+    spec=issue.get('expectation') or issue.get('legacy_detail',{}).get('expectation')
+    if spec is None:return {'predicate':'must_exist','months':None}
+    if not isinstance(spec,dict) or spec.get('predicate') not in PREDICATES:
+        raise ValueError('历史回归预期谓词须为 '+'/'.join(PREDICATES))
+    out={'predicate':spec['predicate'],'months':spec.get('months')}
+    if out['months'] is not None:
+        _list(out['months'],'预期适用月份')
+        for mm in out['months']:month(mm)
+    if out['predicate'] in ('property','aggregate'):
+        _text(spec.get('field'),'预期字段')
+        if spec.get('comparison') not in COMPARISONS:raise ValueError('预期比较符须为 '+'/'.join(sorted(COMPARISONS)))
+        if 'value' not in spec:raise ValueError('预期缺比较值')
+        out.update(field=spec['field'],comparison=spec['comparison'],value=spec['value'])
+    _text(spec.get('basis'),'预期依据')
+    return out
+
+
+def _row_month(row):
+    return str(row.get('month_dt',row.get('month','')))[:7]
+
+
+def _row_matches(row,target):
+    return all(k in row and (None if row[k] is None else str(row[k]))==value for k,value in target.items())
+
+
+def _compare(expect,observed):
+    op=COMPARISONS[expect['comparison']];want=expect['value']
+    if expect['comparison'] in ('eq','ne'):
+        return op(None if observed is None else str(observed),None if want is None else str(want))
+    if observed is None:return False
+    return op(float(observed),float(want))
+
+
+def _verify_regression_layer(run,issue,rows,complete_rows=None):
     targets=_regression_objects(run,issue)
     historical_months=set()
     for source in (issue.get('legacy_detail',{}),issue):
@@ -563,11 +627,38 @@ def _verify_regression_layer(run,issue,rows):
     if not historical_months:raise ValueError('历史时期未明确；仅有新月不能通过回归，须保留 unavailable')
     required_months=historical_months | {run.manifest['data_month']}
     for mm in required_months:month(mm)
+    expect=_regression_expectation(issue)
+    if expect['predicate']=='must_exist':
+        for target in targets:
+            for mm in required_months:
+                if not any(_row_month(r)==mm and _row_matches(r,target) for r in rows):
+                    raise ValueError('各层回归缺精确国家/平台/父体/SKU 的历史月或新月原始对象；须保留 unavailable')
+        return
+    checked=set(expect['months'] or {run.manifest['data_month']})
+    if checked-required_months:raise ValueError('预期月份越出历史时期与当月')
+    # Absence and corrected values are claims about the whole queried space, so
+    # they are judged against the complete verified result, never a cited row.
+    universe=rows if complete_rows is None else complete_rows
+    for mm in checked:
+        if not any(_row_month(r)==mm for r in universe):
+            raise ValueError('该月完整查询无任何结果，不能区分已修复与未观测；须保留 unavailable')
+    if expect['predicate']=='aggregate':
+        for mm in checked:
+            total=sum(float(r.get(expect['field']) or 0) for r in universe
+                      if _row_month(r)==mm and any(_row_matches(r,t) for t in targets))
+            if not _compare(expect,total):raise ValueError('回归聚合预期未达成：'+mm)
+        return
     for target in targets:
-        for mm in required_months:
-            if not any(str(r.get('month_dt',r.get('month','')))[:7]==mm and all(
-                    k in r and (None if r[k] is None else str(r[k]))==value for k,value in target.items()) for r in rows):
-                raise ValueError('各层回归缺精确国家/平台/父体/SKU 的历史月或新月原始对象；须保留 unavailable')
+        for mm in sorted(historical_months-checked):
+            if not any(_row_month(r)==mm and _row_matches(r,target) for r in rows):
+                raise ValueError('缺原时期原始对象，不能证明缺陷曾经成立；须保留 unavailable')
+        for mm in sorted(checked):
+            present=[r for r in universe if _row_month(r)==mm and _row_matches(r,target)]
+            if expect['predicate']=='must_not_exist':
+                if present:raise ValueError('对象在应消失的月份仍然存在：'+mm)
+            elif not present:raise ValueError('缺该月原始对象，无法核对预期属性；须保留 unavailable')
+            elif not all(_compare(expect,r.get(expect['field'])) for r in present):
+                raise ValueError('对象属性未达成回归预期：'+mm)
 
 
 def record_baseline_review(run,actor,value,*,_audit=False):
@@ -589,6 +680,9 @@ def record_baseline_review(run,actor,value,*,_audit=False):
             if digest((run.path/rel).read_bytes())!=run.manifest['inputs'][rel]['sha256']:raise ValueError('内部输入版本改变')
         calculations=_list(v.get('reconciliations'),'内部与大盘原始值复算')
         for c in calculations:review.recompute(run.get_evidence,c,None)
+        if v.get('reconciliation_contract') is None:
+            v['contract_limitation']='内部对账未声明左右来源/匹配键/期间/单位/容差，本次不构成无保留通过'
+        else:_reconciliation_contract(v,calculations)
         if not any(l['evidence_id'] in v.get('internal_evidence_ids',[]) for c in calculations for l in [o['locator'] for o in c['operands']]):raise ValueError('复算未包含内部原始凭据')
         for eid in _list(v.get('internal_evidence_ids'),'内部证据'):
             owner,origin,meta,payload=review._receipt_origin(run,run.get_evidence,eid)
@@ -625,10 +719,11 @@ def record_baseline_review(run,actor,value,*,_audit=False):
             if set(v.get('source_layers_verified',[]))!={'raw','std'}:raise ValueError('必须回归底层 raw/std；仅展示修正不算回归')
             for layer in ('raw','std'):
                 layer_refs=_list(v.get(layer+'_object_locators'),'各层原始历史对象')
-                allowed,_,_=_verified_query_proofs(run,v.get(layer+'_proof_jobs'),run.get_evidence,
+                allowed,_,checked_jobs=_verified_query_proofs(run,v.get(layer+'_proof_jobs'),run.get_evidence,
                     issue.get('site',scope.get('site')),native_only=True)
                 if any(l['evidence_id'] not in allowed for l in layer_refs):raise ValueError('历史对象定位未属于该层完整原生查询证明')
-                _verify_regression_layer(run,issue,[review.locator(run.get_evidence,l) for l in layer_refs])
+                complete=[r for owner,job in checked_jobs for r in owner.job_rows(job['job_id'])]
+                _verify_regression_layer(run,issue,[review.locator(run.get_evidence,l) for l in layer_refs],complete)
                 table=run.policy[layer+'_table']
                 for l in layer_refs:
                     _,_,_,payload=review._receipt_origin(run,run.get_evidence,l['evidence_id'])
@@ -675,15 +770,23 @@ def coverage_status(run,include_tasks=False):
     if frozen['query_plan_hash']!=digest(plan(run.manifest)) or frozen['policy_hash']!=run.manifest['policy_hash']:raise ValueError('覆盖计划变更')
     reading=reading_status(run,index);case_state=_registry(run) if (run.path/'investigations/cases/state.json').exists() else {'cases':[]}
     constraints={c['check_id']:c for c in index['constraints']}
-    owned={cid for c in case_state['cases'] for cid in c['constraint_ids'] if cid in constraints and any(_owns_constraint(u,constraints[cid]) for u in c['scope_units'])}
     failed={c['check_id'] for c in index['constraints'] if c['state']=='failed'}
-    reviews={}
+    # Only explicit failures are claimable, so passed/unavailable constraints are
+    # never forced to resolve a frozen platform set they do not need.
+    ownership={}
+    for cid in failed:
+        units=[u for case in case_state['cases'] if cid in case['constraint_ids'] for u in case['scope_units']]
+        required,covered=constraint_coverage(run,constraints[cid],units)
+        ownership[cid]={'required':len(required),'covered':len(covered),'missing_cells':[list(x) for x in sorted(required-covered,key=canonical)]}
+    owned={cid for cid,v in ownership.items() if not v['missing_cells']}
+    reviews={};review_limitations=[]
     for e in _events(run,'question.baseline.reviewed'):
         v=read(run.path/'baseline-reviews'/(e['review_id']+'.json'))
         if digest(v)!=e['sha256']:raise ValueError('基础检查审核记录变更')
         for eid in v['evidence_ids']:run.get_evidence(eid)
         for link in v['raw_locators']:review.locator(run.get_evidence,link)
         reviews[v['check_id']]=v
+        if v.get('contract_limitation'):review_limitations.append(v['check_id']+'：'+v['contract_limitation'])
     checks=baseline_checks(run);states={}
     for c in checks:
         v=reviews.get(c['check_id']);states[c['check_id']]=v['status'] if v and v['check_sha256']==digest(c) else 'not_executed'
@@ -708,12 +811,108 @@ def coverage_status(run,include_tasks=False):
         'fact_cells':index['fact_cells'],'observed_cells':index['observed_cells'],
         'constraint_states':index.get('constraint_states',dict(Counter(c['state'] for c in index['constraints']))),
         'unowned_failure_ids':sorted(failed-owned),'panorama_reading':reading,
+        'failure_scope_coverage':{cid:ownership[cid] for cid in sorted(failed)},
         'baseline_check_states':dict(Counter(states.values())),'baseline_checks':[{**c,'state':states[c['check_id']]} for c in checks],
         'query_complete':counts.get('success',0)==len(index['baseline_jobs']),
         'reading_complete':not reading['unread_partition_ids'],'hard_failure_ownership_complete':failed<=owned,
         'baseline_checks_complete':all(s in ('passed','not_applicable') or cid in resolved_failed for cid,s in states.items()),
         'failed_checks_with_reviewed_disposition':sorted(resolved_failed),
-        'limitations_count':len(limitations),'limitations':limitations,'errors':[]}
+        'limitations_count':len(limitations),'limitations':limitations,
+        'review_limitations':sorted(review_limitations),'errors':[]}
+
+
+def _reconciliation_contract(v,calculations):
+    """Arithmetic alone cannot prove the two sides were ever comparable.
+
+    A recomputation checks addition; it does not notice that one side is CNY and
+    the other USD, that the periods differ, or that SKU rows were matched against
+    SPU rows. The contract states left/right identity, match keys and tolerance so
+    those are checkable rather than assumed.
+    """
+    c=v.get('reconciliation_contract')
+    if not isinstance(c,dict):raise ValueError('内部对账须声明左右来源、匹配键、期间、单位、容差与差异')
+    sides={}
+    for name in ('left','right'):
+        side=c.get(name)
+        if not isinstance(side,dict):raise ValueError('对账缺 '+name+' 方来源声明')
+        for k in ('source','grain','period','unit'):_text(side.get(k),name+'.'+k)
+        sides[name]=side
+    for k in ('grain','period','unit'):
+        if sides['left'][k]!=sides['right'][k]:
+            raise ValueError('对账两方 '+k+' 不一致，本身不可比：'+str(sides['left'][k])+' / '+str(sides['right'][k]))
+    _list(c.get('match_keys'),'对账匹配键')
+    tol=c.get('tolerance')
+    if not isinstance(tol,dict) or not isinstance(tol.get('absolute'),(int,float)) or isinstance(tol.get('absolute'),bool) or tol['absolute']<0:
+        raise ValueError('对账容差须为非负数值')
+    diff=c.get('difference')
+    if not isinstance(diff,dict):raise ValueError('对账缺差异声明')
+    calc=next((x for x in calculations if x.get('calculation_id')==diff.get('calculation_id')),None)
+    if calc is None:raise ValueError('对账差异未绑定实际复算')
+    if not isinstance(diff.get('value'),(int,float)) or isinstance(diff['value'],bool) or float(calc['result'])!=float(diff['value']):
+        raise ValueError('对账差异与复算结果不一致')
+    if abs(float(diff['value']))>float(tol['absolute']) and v['status']=='passed':
+        raise ValueError('对账差异超出声明容差，不能记通过')
+    residual=c.get('unmatched')
+    if not isinstance(residual,dict):raise ValueError('对账缺未匹配残差')
+    for k in ('left_only_rows','right_only_rows'):
+        if type(residual.get(k)) is not int or residual[k]<0:raise ValueError('未匹配行数 '+k+' 须为非负整数')
+    if residual['left_only_rows'] or residual['right_only_rows']:
+        _text(residual.get('basis'),'未匹配残差的具体说明')
+        for k in ('left_only_amount','right_only_amount'):
+            if not isinstance(residual.get(k),(int,float)) or isinstance(residual[k],bool):
+                raise ValueError('未匹配残差须给出金额规模：'+k)
+    return c
+
+
+def report_quantities(run,content,findings):
+    """A reported number must BE an audited target calculation, not a retyped figure.
+
+    Structural checks alone let a report state an impact no calculation supports,
+    or quietly drop one that was measured. Stating a figure no calculation backs is
+    a false claim and stays a hard error; merely omitting one is a gap, so it is
+    carried as a limitation that still denies an unreserved pass.
+    """
+    errors=[];limitations=[]
+    for f in content.get('findings',[]):
+        owned=[oid for oid in f.get('obligation_ids',[]) if oid in findings]
+        measured={}
+        for oid in owned:
+            answer=findings[oid];calcs={c['calculation_id']:c for c in answer.get('calculations',[])}
+            for metric,item in answer.get('metric_impacts',{}).items():
+                if item.get('state')!='measured':continue
+                measured[(oid,metric)]={cid:calcs.get(cid) for cid in item.get('calculation_ids',[])}
+        items=f.get('quantities',[])
+        if not isinstance(items,list):errors.append('报告量化数字须为列表');items=[]
+        stated=set()
+        for q in items:
+            if not isinstance(q,dict):errors.append('报告量化数字须为结构化条目');continue
+            oid=q.get('obligation_id');metric=q.get('metric');cid=q.get('calculation_id')
+            if not isinstance(q.get('statement'),str) or not q['statement'].strip():
+                errors.append('报告数字缺口径说明：'+str(cid));continue
+            if oid not in owned:errors.append('报告数字引用不属于该结论的范围：'+str(oid));continue
+            calc=measured.get((oid,metric),{}).get(cid)
+            if calc is None:errors.append('报告数字未绑定该指标的已审复算：'+str(cid));continue
+            if calc.get('scope_role','target')!='target':errors.append('报告数字引用了背景计算：'+str(cid));continue
+            if calc.get('metric')!=metric:errors.append('报告数字与复算量纲不一致：'+str(cid));continue
+            value,result=q.get('value'),calc.get('result')
+            same=panorama._close(value,result) if metric=='amount' else value==result
+            if not same:errors.append('报告数字与已审复算结果不一致：'+str(cid));continue
+            stated.add((oid,metric))
+        for key in measured:
+            if key not in stated:limitations.append('已审量化影响未在报告中按原复算列出：'+key[0]+':'+key[1])
+    return errors,limitations
+
+
+def aggregate_verdict(investigation,errors=(),limitations=()):
+    """Execution completion is distinct from unreserved business acceptance."""
+    counts=investigation.get('business_verdicts',{})
+    if (not isinstance(counts,dict) or any(k not in ('pass','qualified','reject','undetermined') or
+            type(v)!=int or v<0 for k,v in counts.items())):return 'undetermined'
+    if errors or limitations:return 'undetermined'
+    if counts.get('reject'):return 'reject'
+    if counts.get('undetermined'):return 'undetermined'
+    if counts.get('qualified'):return 'qualified'
+    return 'pass' if investigation.get('unreserved_acceptance_eligible') is True else 'undetermined'
 
 
 def validate(run,persist=True):
@@ -732,12 +931,14 @@ def validate(run,persist=True):
             if not cov[name]:errors.append(name+':incomplete')
         limitations=cov['limitations']
         if limitations:errors.append('objective_check_applicability_or_evidence_unavailable')
+        # Declared gaps deny an unreserved pass without hard-stopping the run.
+        limitations=limitations+cov.get('review_limitations',[])
     except (ValueError,OSError,KeyError,TypeError) as exc:errors.append('coverage:'+str(exc))
     content=read(run.path/'report-content.json') if (run.path/'report-content.json').exists() else None
     if content is None:errors.append('report_content_missing')
     try:
         investigation=inv.audit(run,content)
-        errors.extend(investigation['errors'])
+        errors.extend(investigation['errors']);limitations=limitations+investigation.get('limitations',[])
         if not investigation['substantive_complete']:errors.append('question_investigation_incomplete')
     except (ValueError,OSError,KeyError,TypeError) as exc:errors.append('investigation:'+str(exc))
     # The original bracketing fingerprints remain mandatory and are never
@@ -745,6 +946,19 @@ def validate(run,persist=True):
     for end in plan(run.manifest,True):
         errs=verify_job(run,end);errors.extend(errs)
         if errs:continue
+        if end['family']=='delivery':
+            # Country fingerprints cannot see a rebuild that leaves every aggregate
+            # intact and only moves objects between categories; the upstream table's
+            # own update time can, so it brackets the run independently.
+            begin=next(j for j in plan(run.manifest) if j['family']=='delivery')
+            try:
+                stamp=lambda rows:{(r['table_schema'],r['table_name']):r['update_time'] for r in rows}
+                a=stamp(run.job_rows(begin['job_id']));b=stamp(run.job_rows(end['job_id']))
+                if set(a)!=set(b):errors.append('delivery_tables_changed')
+                for t in sorted(set(a)&set(b)):
+                    if a[t]!=b[t]:errors.append('delivery_rebuilt_during_run:'+'.'.join(t))
+            except (ValueError,OSError,KeyError) as exc:errors.append(str(exc))
+            continue
         begin=next(j for j in plan(run.manifest) if j['family']=='fingerprint' and j['site']==end['site'] and j['entity']==end['entity'])
         try:
             a={r['month_dt']:r for r in run.job_rows(begin['job_id'])};b={r['month_dt']:r for r in run.job_rows(end['job_id'])}
@@ -775,8 +989,7 @@ def validate(run,persist=True):
             for eid in f.get('evidence_ids',[]):run.get_evidence(eid)
         reported={f.get('case_id') for f in content.get('findings',[])}
         if not set(known)<=reported:errors.append('report_omits_registered_topic')
-    verdicts=investigation.get('business_verdicts',{});verdict='undetermined'
-    if not errors:verdict='reject' if verdicts.get('reject') else 'qualified' if verdicts.get('qualified') else 'pass'
+    verdict=aggregate_verdict(investigation,errors,limitations)
     result={'method_version':run.manifest['method_version'],'execution_state':'incomplete' if errors else 'complete',
         'business_verdict':verdict,'errors':sorted(set(errors)),'limitations':limitations,'coverage':cov,'investigation':investigation,
         'data_consistency':run.manifest['data_consistency'],'ordinary_observations_create_obligations':False}
@@ -809,6 +1022,9 @@ def render(run):
                 '范围：'+'；'.join(u['site']+' '+','.join(u['platforms'])+' '+','.join(u['event_months'])+' '+canonical(u['paths']) for u in c['scope_units'])]
             for field,label in [('observation_change','观察变化'),('proven_error','已证错误影响'),('unresolved_quality_risk','未解决质量风险'),('counterevidence','反证与边界')]:
                 if f.get(field):lines += [label+'：'+(f[field] if isinstance(f[field],str) else canonical(f[field]))]
+            for qty in f.get('quantities',[]) or []:
+                lines += ['量化影响（'+str(qty.get('metric'))+'，复算 '+str(qty.get('calculation_id'))+'）：'
+                          +str(qty.get('value'))+'　'+str(qty.get('statement'))]
             if f.get('evidence_ids'):
                 lines += ['证据：'+'、'.join('['+eid+']('+str(run.path/'evidence'/(eid+'.json'))+')' for eid in f['evidence_ids'])]
             lines += ['下一核查：'+f.get('next_check',c['next_check']), '停止条件：'+c['stop_condition'],'']

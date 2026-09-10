@@ -42,9 +42,9 @@ metadata:
 1. 读 `验收/config.yaml`、`项目范围.md` 与可用契约，明确数据月。`acceptance_run.py start --month YYYY-MM` 冻结 Skill、政策、项目和历史输入。此后用 `<RUN>/inputs/skill/scripts/acceptance_run.py`；修订冻结输入须新建运行。查询、失败重试、真实耗时和证据复用沿用现有机制，SQL 并发容量只管资源。
 2. `scan`、`analyze`、`panorama-status` 导出全部事实和客观约束。需要复用原包时用 `evidence-reuse` 验证完全相同的 SQL、分页和来源；明确哪些来自旧观测、哪些是本轮在线查询。两者不伪装成事务快照。
 3. 实际启动国家/风险分区阅读 Agent。用 `panorama-read` 保存其判断、完整已读范围、未读范围、关键原始定位、原始判读产物及真实独立性。先冻结独立发现，再读历史答案；读过历史的执行者不得声称盲测。普通未立案观察不逐条签“正常证明”。
-4. `investigation-plan --coordinator MAIN` 建立协调身份与空的权威案件台账。主 Agent 用 `question-register` 登记质量疑问及 `scope_units`，保留反向分量、首查和停止条件。同一事件可跨月、路径和层；跨国保留独立核查范围。强约束失败必须由覆盖其实际范围的议题负责；查询错误先恢复查询。
+4. `investigation-plan --coordinator MAIN` 建立协调身份与空的权威案件台账。主 Agent 用 `question-register` 登记质量疑问及 `scope_units`，保留反向分量、首查和停止条件。同一事件可跨月、路径和层；跨国保留独立核查范围。强约束失败必须由覆盖其**完整适用范围**的议题负责：未写平台/层/路径的约束代表该国全部冻结平台、适用层与全站，可由多个 scope_units 的并集共同认领；查询错误先恢复查询。
 5. `question-jobs` 生成定向聚合或完整 cohort，`question-collect` 用原生分页和自然月复用执行。先聚合；必要时才生成 `details` 完整明细。查询分片不增加业务义务。Worker 可建议范围调整，由主 Agent 版本化登记；活跃任务先保存进度再重排。不得删除路径、时期或重大反证来完成问题。
-6. 主 Agent 实际启动调查子 Agent，以真实 ID `investigation-assign` 绑定完整合同。答卷按问题选择检查，不机械跑品牌/价格/语义专项。`investigation-submit` 校验并接收原始材料；主 Agent 阅读定位、复算、反证后 `investigation-review`。重大正常判断、历史回归和冲突需要未参与调查的第三人独立复核。审后合同、证据或来源变动使原审核失效。
+6. 主 Agent 实际启动调查子 Agent，以真实 ID `investigation-assign` 绑定完整合同。答卷按问题选择检查，不机械跑品牌/价格/语义专项。`investigation-submit` 校验并接收原始材料；主 Agent 阅读定位、复算、反证后 `investigation-review`。计入影响的定位与复算必须落在本问题的国家/平台/月份/层/路径范围内，跨范围材料只能标为背景或反证并说明关系。重大正常判断、历史回归和冲突需要未参与调查的第三人独立复核。审后合同、证据或来源变动使原审核失效。
 7. 尚未回答的质量问题继续在原范围补查，不因全部市场波动缺原因解释而生成 SKU 任务。预算/时间/容量不足用 `investigation-progress` 保存真实断点，不能记作外部缺证。真实外部受阻必须指出记录、持有人、实际尝试、判断影响和恢复条件；受阻不计核实。
 8. `independent-freeze` 后 `history-plan` 清点历史，`sampling-plan` 从全部适用 L3 单元分层抽样，`sampling-collect` 采集。`baseline-review` 保存样本、历史、内部对账和发布承接的实际核对与不同审核者。样本异常扩展适用检查范围并关联议题；纯语义历史仅作为有出处的辅助事项，不重建语义测试专项。
 9. 所有取证后 `finish-scan`、`validate`、`render`。分别交代查询、客观检查、全景判读、议题/独立范围、真实任务/有效主审、未解决范围和实际查询/明细/重试成本。零议题可以完成，但必要检查、阅读、抽查和回归不能空缺。未完成用 `checkpoint` 保留报告与续跑；`seal` 重算门槛。报告只落盘，不自动外发或修改源数据。
