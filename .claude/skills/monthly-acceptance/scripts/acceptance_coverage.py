@@ -714,13 +714,15 @@ def _sampling_job(run, cell):
 
 
 def sampling_jobs(run):
-    import acceptance_questions as questions
-    if questions.enabled(run):return questions.sampling_jobs(run)
     """Return pending/complete executable sample jobs for the current required set.
 
-    Execute using the ordinary paginated ``execute_job`` transport. A miss adds
-    all same-country historical cells to this queue; SQL remains read-only.
+    Execute using the ordinary paginated ``execute_job`` transport; SQL remains
+    read-only. A miss expands the queue by the scope its own plan froze — the
+    stratum under v4, all same-country cells under the earlier plans that still
+    carry ``expansion_scope: all_no_signal_cells_in_same_country_and_level``.
     """
+    import acceptance_questions as questions
+    if questions.enabled(run):return questions.sampling_jobs(run)
     if not enabled(run):
         return []
     sampling = _frozen(run, 'coverage-sampling-plan')

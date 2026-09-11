@@ -490,6 +490,7 @@ def prepare_sampling(run):
     selected=[c['cell_id'] for key,g in sorted(groups.items()) for c in sorted(g,key=lambda c:(digest([seed,c['cell_id']]),c['cell_id']))[:n]]
     return _freeze(run,'coverage-sampling-plan',{'protocol':protocol(run,4),'population':cells,'selected_cell_ids':sorted(selected),
         'seed':seed,'stratification':['site','month'],'per_stratum':n,'population_version':'all_applicable_observed_L3/'+protocol(run,'4.0'),
+        'expansion_scope':'all_cells_in_the_missed_stratum',
         'panorama_binding_sha256':index['binding_sha256'],'coverage_claim':'只证明选中对象；抽查身份、源行映射结构与量价，不做类目语义测试'})
 
 
@@ -497,12 +498,16 @@ def sampling_jobs(run):
     from acceptance_coverage import _frozen,_sampling_job
     s=_frozen(run,'coverage-sampling-plan');required=set(s['selected_cell_ids'])
     # A concrete miss expands the checking population, not business obligations.
+    # It expands its own stratum: the miss is evidence about that site-month's
+    # draw, not about the site's other thirty months. Expanding site-wide put
+    # thousands of cells in the queue for one miss, so the gate could only ever
+    # report not_executed — an obligation nobody can discharge proves nothing.
     for e in _events(run,'question.baseline.reviewed'):
         v=read(run.path/'baseline-reviews'/(e['review_id']+'.json'))
         if digest(v)!=e['sha256']:raise ValueError('抽查扩围记录改变')
         if v['check_id'].startswith('sample:') and v['status']=='failed':
             cid=v['check_id'][7:];cell=next(c for c in s['population'] if c['cell_id']==cid)
-            required.update(c['cell_id'] for c in s['population'] if c['site']==cell['site'])
+            required.update(c['cell_id'] for c in s['population'] if c['stratum']==cell['stratum'])
     return [_sampling_job(run,c) for c in s['population'] if c['cell_id'] in required]
 
 

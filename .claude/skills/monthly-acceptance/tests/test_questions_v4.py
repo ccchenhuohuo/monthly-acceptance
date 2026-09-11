@@ -282,3 +282,52 @@ def test_report_keeps_a_distinct_short_title_and_the_question(v4):
     run,index=v4;v=topic(v4);v['display_title']='两月汇总守恒';q.register(run,'main',v)
     q.render(run);report=(run.path/'报告.md').read_text()
     assert '### 两月汇总守恒' in report and report.count(v['business_question'])==1
+
+
+@pytest.fixture
+def two_leaves(tmp_path):
+    """Two L3 leaves per month, so a stratum holds more cells than it draws."""
+    base=tmp_path/'audit';base.mkdir()
+    (base/'config.yaml').write_text('站点起始月份: {DE: 2024-01}\n')
+    (base/'项目范围.md').write_text('Amazon DE Electronics; full test contract.')
+    write(base/'policy-overrides.json',{'page_size':5})
+    write(base/'scope-contract.json',{'complete_leaf_list':True,'entries':[{'id':'root','site':'DE','path_prefix':['Electronics'],'effective_from':'2024-01'}]})
+    run=Run(create_run(base,Path(__file__).resolve().parents[1],'2024-02'));run.register_plan(plan(run.manifest));q.prepare_coverage(run)
+    for j in plan(run.manifest):
+        rows=rows_for(run,j)
+        if j['family']=='platform':rows=[{'month_dt':mm+'-01','platform':'Amazon','nrows':1,'spus':1,'effective_skus':1,'placeholder_sku_rows':0,'invalid_rows':0,'units':10,'amount':100} for mm in ('2024-01','2024-02')]
+        if j['family']=='category' and j.get('level')==3:
+            rows=[{**r,'path':json.dumps(['a','b',leaf],ensure_ascii=False,separators=(',',':')),'units':5,'amount':50} for r in rows for leaf in ('c','d')]
+        record(run,j,rows);write(run.path/'records'/(j['job_id']+'-plan.json'),j)
+    index=panorama.build(run);q.prepare(run,'main')
+    q.freeze_discovery(run,{'independence_disclosure':'测试发现固定后抽查。'})
+    return run,index,q.prepare_sampling(run)['payload']
+
+
+def _fail_one_sample(run,index,cell):
+    from acceptance_coverage import _sampling_job
+    from acceptance_validate import verify_job
+    job=_sampling_job(run,cell)
+    record(run,job,[{'site':cell['site'],'month_dt':cell['month']+'-01','platform':'Amazon','product_id':'p'+str(i),'sku_id':'s'+str(i),
+        'path':cell['path'],'title':'Example camera accessory','raw_category':'["Electronics"]','raw_path_count':1,'title_variants':1,
+        'source_rows':1,'units':5,'amount':50,'population_objects':2,'sample_rank':i+1} for i in range(2)])
+    assert verify_job(run,job)==[]
+    case=q.register(run,'main',topic((run,index)));eid=run.job_record(job['job_id'])['evidence_ids'][0];rows=run.job_rows(job['job_id'])
+    def link(n):
+        row=rows[n]
+        return {'evidence_id':eid,'pointer':'/response/data/'+str(n),'record_sha256':digest(row),'fields':['product_id','sku_id','platform','units','amount'],
+            'object_keys':{k:row[k] for k in ('product_id','sku_id','platform')},'purpose':'逐一核对抽中单元的全部确定对象'}
+    q.record_baseline_review(run,'main',{'check_id':'sample:'+cell['cell_id'],'reviewer_id':'main','investigator_id':'worker','status':'failed',
+        'finding':'抽中单元的两个对象标题与标准类目不符，判定该单元抽查未通过。','action':'把该单元的错分对象交给已登记议题继续核实。',
+        'counterevidence':'两个对象量额均小，不能据此推断整站错分。','evidence_ids':[eid],'raw_locators':[link(0),link(1)],'case_ids':[case['case_id']]})
+
+
+def test_a_missed_sample_expands_its_own_stratum_not_the_whole_site(two_leaves):
+    """一个月的抽查失败只说明那个月的抽签，扩到整站就没人跑得完，门槛等于作废。"""
+    run,index,plan_payload=two_leaves
+    assert len(plan_payload['population'])==4 and len(plan_payload['selected_cell_ids'])==2
+    cell=next(c for c in plan_payload['population'] if c['cell_id'] in plan_payload['selected_cell_ids'] and c['month']=='2024-01')
+    _fail_one_sample(run,index,cell)
+    jobs=q.sampling_jobs(run);required={j['cell_id'] for j in jobs}
+    assert required=={c['cell_id'] for c in plan_payload['population'] if c['month']=='2024-01'} | set(plan_payload['selected_cell_ids'])
+    assert len(jobs)==3 and sum(1 for j in jobs if j['month']=='2024-02')==1
