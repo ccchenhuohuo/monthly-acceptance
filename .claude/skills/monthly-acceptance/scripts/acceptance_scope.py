@@ -27,7 +27,8 @@ def constraint_cells(run, constraint):
     target=path(scope.get('path',scope.get('path_prefix',[])))
     path_layer='raw' if 'path_prefix' in scope else 'std' if 'path' in scope else None
     periods={constraint['month']}
-    if rule=='movement_conservation':
+    if rule in ('movement_conservation','level_shift'):
+        # A cross-month statement is not owned by looking at one side of it.
         periods.add(shift(constraint['month'],-int(scope['comparison'].split(':')[0])))
     return {(site,pl,layer,mm,path_layer,canonical(target))
             for pl in platforms for layer in layers for mm in periods}

@@ -59,10 +59,47 @@ def _read(run):
     return jobs,datasets,receipts
 
 
+def _ratio(current,base):
+    """A ratio needs a positive base; a month that started at zero has none."""
+    if current is None or base is None or float(base)<=0 or float(current)<0:return None
+    return float(current)/float(base)
+
+
+LEVEL_SHIFT={'identity_ratio':1.5,'divergence_ratio':1.5}
+
+
+def _level_shift(policy,previous,current):
+    """Identity counts moving far more than units and amount is a step in the
+    collection, not in the market: the same shops cannot start carrying half
+    again as many SKUs in one month without the money moving with them.
+
+    Nobody can name the guilty product for this, which is exactly why it needs
+    to be an objective check — a defect only expressible as a whole country's
+    water level has no other route into a case.
+    """
+    identity_ratio=float(policy.get('level_shift',{}).get('identity_ratio',LEVEL_SHIFT['identity_ratio']))
+    divergence_ratio=float(policy.get('level_shift',{}).get('divergence_ratio',LEVEL_SHIFT['divergence_ratio']))
+    facts={'comparison':'1:mom','direction':None,
+        'thresholds':{'identity_ratio':identity_ratio,'divergence_ratio':divergence_ratio},
+        'previous':{k:(previous or {}).get(k) for k in ('month_dt','nrows','spus','units','amount')},
+        'current':{k:(current or {}).get(k) for k in ('month_dt','nrows','spus','units','amount')}}
+    ratios={k:_ratio((current or {}).get(k),(previous or {}).get(k)) for k in ('nrows','spus','units','amount')}
+    facts['ratios']=ratios
+    if any(v is None for v in ratios.values()):return facts,'unavailable'
+    identity=[ratios['nrows'],ratios['spus']];value=[ratios['units'],ratios['amount']]
+    # Compared by multiplication, not division: a metric that fell to zero still
+    # yields a verdict instead of an undefined quotient.
+    facts['identity_move']=[min(identity),max(identity)];facts['value_move']=[min(value),max(value)]
+    if min(identity)>=identity_ratio and min(identity)>=divergence_ratio*max(value):facts['direction']='jump'
+    elif max(identity)*identity_ratio<=1 and min(value)>=divergence_ratio*max(identity):facts['direction']='drop'
+    return facts,'failed' if facts['direction'] else 'passed'
+
+
 def _constraint(kind,site,mm,scope,refs,facts,state='passed',family=None):
     family=family or {'arrival':'completeness','platform_arrival':'completeness','mapping':'duplication',
         'valid_identity':'identity','valid_values':'conservation','band_conservation':'price_bands',
-        'hierarchy_conservation':'conservation','movement_conservation':'conservation','contract':'completeness'}[kind]
+        'hierarchy_conservation':'conservation','movement_conservation':'conservation','contract':'completeness',
+        'level_shift':'time_series'}[kind]
     key=[kind,site,mm,scope]
     return {'check_id':'check-'+digest(key)[:24], 'rule':kind,'family':family,'site':site,'month':mm,
         'scope':scope,'state':state,'source_jobs':sorted(set(refs)),'facts':facts,
@@ -106,6 +143,11 @@ def derive(run,jobs,data,receipts):
                     for rule,field in [('valid_identity','invalid_keys'),('valid_values','invalid_rows')]:
                         checks.append(_constraint(rule,site,mm,{'layer':layer},js,{field:r.get(field)},
                             'unavailable' if r.get(field) is None else 'failed' if r[field] else 'passed'))
+                if shift(mm,-1)>=run.manifest['starts'][site]:
+                    previous=fp.get((site,layer,shift(mm,-1)))
+                    shift_facts,shift_state=_level_shift(run.policy,previous[0] if previous else None,pair[0] if pair else None)
+                    checks.append(_constraint('level_shift',site,mm,{'layer':layer,'comparison':'1:mom'},js,
+                        shift_facts,shift_state if available else 'unavailable'))
         for mm in grid:
             pair=mapping.get((site,mm));js=by_family[(site,'mapping')]
             fields=('raw_duplicate_rows','std_duplicate_rows','std_only_keys','value_mismatch_keys')

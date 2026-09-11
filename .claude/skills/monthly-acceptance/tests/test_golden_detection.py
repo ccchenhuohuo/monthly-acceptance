@@ -73,6 +73,15 @@ def set_field(family, field, value, *, level=None, index=-1):
     return mutate
 
 
+def level_shift(index=-1, **values):
+    """Move one month's country fingerprint, leaving the other month alone."""
+    def mutate(job, rows):
+        if job['family'] == 'fingerprint' and rows:
+            rows[index].update(values)
+        return rows
+    return mutate
+
+
 def unexpected_platform(job, rows):
     if job['family'] == 'platform':
         return rows + [dict(rows[0], platform='Tmall')]
@@ -99,6 +108,8 @@ CASES = [
     ('数值守恒：子级汇总对不上父级', set_field('category', 'units', 999, level=3), 'hierarchy_conservation'),
     ('时间异常：变化分量与当月记录不符', set_field('movement', 'current_units', 777), 'movement_conservation'),
     ('价格带：带内金额与类目金额背离', set_field('bands', 'amount', 555, level=3), 'band_conservation'),
+    ('时间序列：身份数量跨月跳涨而量额不动', level_shift(nrows=3, spus=3), 'level_shift'),
+    ('时间序列：身份数量跨月塌陷而量额不动', level_shift(index=0, nrows=3, spus=3), 'level_shift'),
 ]
 
 
@@ -129,7 +140,26 @@ def test_every_audit_family_has_at_least_one_detection_case(results):
                for c in results[name]['constraints'] if c['state'] == 'failed' and c['rule'] == rule}
     # historical_regression is driven by the issue ledger rather than baseline
     # rows, and is covered by the regression fixtures in test_convergence_guards.
-    assert {'completeness', 'duplication', 'conservation', 'price_bands'} <= covered
+    assert {'completeness', 'duplication', 'conservation', 'price_bands', 'time_series'} <= covered
+
+
+@pytest.mark.parametrize('name,mutate', [
+    ('整体同比例增长是市场变化，不是水位台阶', level_shift(nrows=2, spus=2, units=20, amount=200)),
+    ('只有行数变、SPU 不变属于粒度重复，归 mapping 管', level_shift(nrows=3)),
+    ('只有 SPU 变、行数不变同样不足以断定水位', level_shift(spus=3)),
+])
+def test_level_shift_does_not_fire_on(tmp_path, name, mutate):
+    """A rule that fires on ordinary growth would force ownership of nothing."""
+    _, index = build(tmp_path, mutate)
+    assert 'level_shift' not in failed_rules(index), name
+
+
+def test_level_shift_is_reported_for_every_month_pair_and_layer(tmp_path):
+    """Absent months become unavailable, never a silently missing check."""
+    _, index = build(tmp_path, drop_last_month('fingerprint'))
+    checks = [c for c in index['constraints'] if c['rule'] == 'level_shift']
+    assert {(c['site'], c['scope']['layer'], c['month'], c['state']) for c in checks} == {
+        ('DE', 'raw', '2024-02', 'unavailable'), ('DE', 'std', '2024-02', 'unavailable')}
 
 
 def drop_one_platform(job, rows):

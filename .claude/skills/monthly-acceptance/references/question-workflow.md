@@ -6,6 +6,7 @@
 
 - `coverage-plan.json`：从冻结配置/预期平台/完整查询生成的检查分母。`panorama/index.json` 绑定完整查询及全部派生事实，具体约束具有独立 passed/failed/unavailable/not_applicable 状态。
 - `panorama/facts-*.json`：连续的全部标准路径×自然月，含无观测，保留价格带、SPU/品牌进入退出和正负贡献。多平台国家（当前仅中国淘系）每个事实另带 `platform_split` 逐平台量额，并有 `platform_split_conservation` 校验各平台之和等于该国类目合计——只塌在单一平台上的缺陷不会再被国家级类目汇总稀释。raw-paths、platforms、country-layers 保留完整上下文及原始行定位。读取 JSON 的全量路径/月份分区，不只看排序结果。
+- `level_shift`（family `time_series`）：国家×数据层逐月比较上一月，行数与 SPU 同时跳到 1.5 倍以上（或塌到 1/1.5 以下）、且身份变动幅度达到件数/金额变动的 1.5 倍时判失败。这类"集合变了、采集水位变了"的缺陷归咎不到任何一个 product_id，以前只能靠人写在判读散文里而丢失；现在它是明确失败，必须由议题按完整适用范围认领。阈值在政策 `level_shift` 冻结，只在国家×层设约束——类目级同口径命中数以百计，逐个强制认领会造出没人跑得完的义务，类目归因由认领该台阶的议题在调查中下钻。
 - `panorama/readings`：实际阅读者的判断、读法、未读范围、独立性和原始产物绑定。生成文件或统计行数本身不算理解。
 - `investigations/cases/state.json`：唯一业务议题主台账，沿用不可变版本和分块存储。一个 case 有多个 scope_units。没有并行的 question/ticket 主台账。
 - `investigations/plan.json` 冻结协调身份与资源政策。调查义务动态重建自现行议题，每个范围为 `question_scope:<case_id>:<scope_unit_id>`，不从 candidates/samples 反推。
@@ -110,7 +111,7 @@ baseline-review 使用既有覆盖来源，明确 check_id、不同 investigator
 - 历史回归可在台账条目上写 `expectation`：`must_exist`（默认，维持原口径）、`must_not_exist`（修复后对象应当离开原位置）、`property`（字段须达到 field/comparison/value）、`aggregate`（匹配对象的字段合计须满足比较）。预期可按数据层分写 ——分类修复类缺陷通常 raw 保持 must_exist（对象仍在源层），std 写 must_not_exist（离开错误标准路径），未写的层沿用默认。缺失与属性类预期按**完整查询结果**判定而非引用行：该月完整查询无任何结果时只能保留 unavailable（不能区分已修复与未观测），并且仍须在原时期给出原始对象以证明缺陷曾经成立。
 - 历史来源逐段清点；必要回归核具体原始对象、原月份和新月份、raw/std。历史 `passed` 需分别提供 `raw_object_locators / std_object_locators` 和 `raw_proof_jobs / std_proof_jobs`；后两者逐页使用 `evidence_id / job_id / record_sha256` 绑定原生执行、不可变计划与完整分页。对象定位必须属于对应层的已验证查询。单值、多值 ID 或 `sku_keys` 均须还原国家/平台/父体/必要 SKU；历史时期或复合身份不明确时保留 unavailable。自报 verified_object_ids、附件自报 SQL 或只修展示不授予回归信用。纯语义事项以有出处的辅助处置保留，不设语义正确性测试。
 - 内部对账需要真实冻结内部数据及双方复算，并且应当声明 `reconciliation_contract`：left/right 各自的 source/grain/period/unit、match_keys、tolerance、difference（绑定实际复算并与其结果一致）与 unmatched（未匹配行数，非零时须给金额规模和具体说明）。**两方 grain/period/unit 不一致即判不可比**——复算只证明算术，从不证明两边可比；差异超出所声明容差不能记通过。契约整体缺失不阻断记录，但会作为 limitation 落在覆盖里，本次不构成无保留通过；契约一旦写了就必须自洽，不自洽仍是硬错误。发布元数据不能替代实际对象量额承接。缺输入如实 unavailable；不能把缺证写成不适用。
-- 明确失败按其**完整适用范围**归属：约束未写平台/层时代表该国全部冻结平台与适用数据层，未写路径代表全站；缺失维度是完整集合，不是任意一个成员。一个 scope_unit 只认领它实际覆盖的格子，其余格子须由别的议题补齐，多个 scope_units 的并集可共同认领；`failure_scope_coverage` 逐约束列出 required/covered/missing_cells。如果已完成证据调查并打回，检查失败可有完成的处置，业务仍 reject。未核或受阻不记 verified。
+- 明确失败按其**完整适用范围**归属：约束未写平台/层时代表该国全部冻结平台与适用数据层，未写路径代表全站；缺失维度是完整集合，不是任意一个成员。跨月约束（`movement_conservation`、`level_shift`）的适用范围含被比较的基月，只盯事发当月只算认领一半。一个 scope_unit 只认领它实际覆盖的格子，其余格子须由别的议题补齐，多个 scope_units 的并集可共同认领；`failure_scope_coverage` 逐约束列出 required/covered/missing_cells。如果已完成证据调查并打回，检查失败可有完成的处置，业务仍 reject。未核或受阻不记 verified。
 
 validate / seal 重建：冻结输入与计划、全查询完整性、所有约束及失败归属、实际阅读、样本/历史/内部/发布检查、有效问题主审、复用来源、原始证据版本、末次指纹以及父/子包之后无新查询、报告对所有议题的承接。另有 `delivery` 交付身份首尾括住整个运行：直接读所查两张表自身的 `UPDATE_TIME`，运行期间上游任何重建都会报 `delivery_rebuilt_during_run`——国家指纹看不见只改类目归属、不动国家总量的重组，交付身份看得见。业务结论由唯一聚合函数产生：存在执行错误、不可用限制或任何 undetermined 时整体 undetermined；有 reject 即 reject；有 qualified 即 qualified；只有无错误、无限制、无未决且实际具备无保留验收资格时才是 pass。执行完成（execution_state）不等于业务无保留通过。
 

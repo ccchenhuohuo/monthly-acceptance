@@ -208,6 +208,56 @@ def test_hard_failure_cannot_vanish_without_candidate(v4):
     assert not inv.all_obligations(run) # ownership gate, not automatic per-row deep debts
 
 
+def _stepped(run):
+    """Identity counts triple in the second month while units and amount hold."""
+    for j in plan(run.manifest):
+        if j['family']=='fingerprint':
+            rs=rows_for(run,j);rs[-1].update(nrows=3,spus=3);record(run,j,rs)
+    return panorama.build(run)
+
+
+def _level_topic(run,failed):
+    j=next(j for j in plan(run.manifest) if j['family']=='fingerprint' and j['entity']=='raw')
+    unit={'scope_unit_id':'de-level','site':'DE','platforms':['Amazon'],'source_layers':['raw','std'],
+        'paths':[[]],'path_layer':'std','event_months':['2024-02'],'background_months':['2024-01'],
+        'stage':'aggregate_first','required_checks':['scope','time_series','counterevidence','impact'],
+        'required_components':[{'component_id':'opposite','question':'两月都要核对身份数量与量额，不能只看跳涨那一侧。'}],
+        'next_check':'比对两月国家指纹与逐条明细，确认多出的身份是新采到的商品还是同一批商品的重复记录。',
+        'stop_condition':'两月身份数量差有逐条来源解释，未解释部分继续留查。',
+        'scope_rationale':'整国水位的跨月台阶归咎不到单个商品，只能按国家整体核查。'}
+    return {'business_question':'身份数量跨月跳涨而件数金额不动，是采集口径变了还是真多了这么多商品？',
+        'reason':'国家×数据层的时间序列客观检查明确失败。','next_check':unit['next_check'],
+        'stop_condition':unit['stop_condition'],'report_placement':'main','scope_units':[unit],
+        'origin_refs':[{'job_id':j['job_id'],'row_index':1,'record_sha256':digest(run.job_rows(j['job_id'])[1])}],
+        'constraint_ids':[c['check_id'] for c in failed]}
+
+
+def test_a_country_water_level_step_is_a_hard_failure_someone_must_claim(v4):
+    """没有哪个商品能为整国水位负责，所以它只能靠客观失败强制落到议题名下。"""
+    run,_=v4;index=_stepped(run)
+    failed=[c for c in index['constraints'] if c['rule']=='level_shift' and c['state']=='failed']
+    assert {(c['scope']['layer'],c['month']) for c in failed}=={('raw','2024-02'),('std','2024-02')}
+    assert set(q.coverage_status(run)['unowned_failure_ids'])=={c['check_id'] for c in failed}
+    q.register(run,'main',_level_topic(run,failed))
+    state=q.coverage_status(run)
+    assert not state['unowned_failure_ids'] and state['hard_failure_ownership_complete']
+
+
+def test_claiming_a_step_requires_both_months_and_the_time_series_check(v4):
+    """台阶是两个月之间的说法；只盯事发当月，或不认这类检查，都不算认领。"""
+    from acceptance_scope import constraint_coverage
+    run,_=v4;index=_stepped(run)
+    check=next(c for c in index['constraints'] if c['rule']=='level_shift' and c['state']=='failed')
+    whole=deepcopy(_level_topic(run,[check])['scope_units'][0]);whole['months']=['2024-01','2024-02']
+    required,covered=constraint_coverage(run,check,[whole])
+    assert covered==required and len(required)==2
+    assert constraint_coverage(run,check,[{**whole,'months':['2024-02']}])[1]=={
+        c for c in required if c[3]=='2024-02'} # 只盯事发当月＝只认领一半，门槛仍记欠账
+    for name,unit in [('不认时间序列检查',{**whole,'required_checks':['scope','conservation','counterevidence','impact']}),
+                      ('只盯某个子树',{**whole,'paths':[['Electronics']]})]:
+        assert constraint_coverage(run,check,[unit])[1]==set(),name
+
+
 def test_query_shards_do_not_create_business_obligations(v4):
     run,index=v4;c=q.register(run,'main',topic(v4));unit=c['scope_units'][0]
     jobs=question_jobs(run.manifest,unit);assert len(jobs)==4 and len(inv.all_obligations(run))==1
