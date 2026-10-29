@@ -381,3 +381,28 @@ def test_a_missed_sample_expands_its_own_stratum_not_the_whole_site(two_leaves):
     jobs=q.sampling_jobs(run);required={j['cell_id'] for j in jobs}
     assert required=={c['cell_id'] for c in plan_payload['population'] if c['month']=='2024-01'} | set(plan_payload['selected_cell_ids'])
     assert len(jobs)==3 and sum(1 for j in jobs if j['month']=='2024-02')==1
+
+
+def test_directed_evidence_is_not_claimed_by_a_wider_topic(v4):
+    """范围更宽的议题不得把别的议题的定向取证算成自己的取证。
+
+    真实回归：一个覆盖全站 raw、全部月份的契约议题，曾把另一个覆盖全站 std、
+    仅两个月的议题的查询记录算成自己的 10 次取证，报告因此声称了从未发生的取证。
+    """
+    run,index=v4
+    narrow=topic(v4);q.register(run,'main',narrow)
+    case=next(c for c in q._registry(run)['cases'])
+    unit=case['scope_units'][0]
+    jobs=question_jobs(run.manifest,unit,'aggregate')
+    for j in jobs:
+        verify_question_job(run.manifest,j)
+        record(run,j,rows_for(run,j));write(run.path/'records'/(j['job_id']+'-plan.json'),j)
+    assert q._case_job_records(run,case), '本议题自己的取证记录必须被认回'
+
+    wide=deepcopy(narrow)
+    wide['business_question']='全站 raw 契约前缀是否与源层一致？'
+    wide['scope_units']=[{**unit,'scope_unit_id':'de-contract','source_layers':['raw'],'path_layer':'raw',
+                          'event_months':['2024-01','2024-02'],'background_months':[]}]
+    q.register(run,'main',wide)
+    other=next(c for c in q._registry(run)['cases'] if c['business_question']==wide['business_question'])
+    assert q._case_job_records(run,other)==[], 'raw 层契约议题不得认领 std 层议题的取证记录'

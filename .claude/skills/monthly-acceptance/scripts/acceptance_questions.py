@@ -1007,20 +1007,121 @@ def validate(run,persist=True):
     return result
 
 
+# 报告是给人读的：状态机词汇、原始 JSON 计数和内部标识符不进正文。
+# 每个映射都留 fallback，未知取值原样透出，宁可一处生硬也不静默丢信息。
+STATE_LABELS={'complete':'已完成','incomplete':'尚未完成'}
+VERDICT_LABELS={'pass':'可放行','pass_with_reservations':'有保留放行','qualified':'有保留放行',
+    'fail':'不可放行','undetermined':'尚不能下结论'}
+GATE_LABELS={'query_complete':'全景聚合查询未跑完','reading_complete':'全景风险分区未判读完',
+    'hard_failure_ownership_complete':'仍有客观检查失败未归属到议题','baseline_checks_complete':'抽查、历史回归与发布承接检查未全部通过',
+    'objective_check_applicability_or_evidence_unavailable':'部分客观检查缺证据或无法判定是否适用',
+    'question_investigation_incomplete':'已立案议题尚未完成实质调查','report_content_missing':'尚未撰写结论正文',
+    'report_summary_missing':'结论正文缺少总结要点','report_unknown_topic':'结论正文写到了未登记的议题',
+    'report_stale_topic':'结论正文引用的议题版本已过期','report_omits_registered_topic':'有已登记议题未在结论正文中交代',
+    'missing_or_failed_job':'收尾指纹查询尚未执行','invalid_job':'查询记录不合法',
+    'delivery_tables_changed':'运行期间交付表清单发生变化','delivery_rebuilt_during_run':'运行期间交付表被重建',
+    'fingerprint_months_changed':'运行期间数据月份集合发生变化','fingerprint_changed':'运行期间底层数据发生变化',
+    'data_changed_during_run':'运行期间底层数据发生变化','data_query_after_final_fingerprint':'收尾指纹之后仍有取数',
+    'policy_differs_from_frozen_source':'策略与冻结来源不一致','scope_differs_from_frozen_source':'范围与冻结来源不一致',
+    'plan_incomplete_or_changed':'查询计划不完整或已变更','coverage':'覆盖率核算失败','investigation':'调查审计失败'}
+CHECK_STATE_LABELS={'passed':'通过','failed':'失败','unavailable':'不可判定','not_applicable':'不适用',
+    'not_executed':'未执行','executed':'已执行','query_failed':'查询失败','pending':'待核实'}
+QUEUE_LABELS={'queued':'待主审','assigned':'已分派','in_review':'主审中','verified':'已核实',
+    'blocked_external':'外部受阻','closed':'已关闭','resolved':'已了结'}
+FAMILY_LABELS={'completeness':'完整性','duplication':'重复与放大','identity':'身份连续性',
+    'conservation':'数值守恒','time_series':'时间序列','price_bands':'价格带','historical_regression':'历史缺陷回归'}
+RULE_LABELS={'arrival':'数据到达','platform_arrival':'平台数据到达','mapping':'类目映射','valid_identity':'身份有效性',
+    'valid_values':'数值有效性','band_conservation':'价格带守恒','hierarchy_conservation':'层级守恒',
+    'movement_conservation':'走势守恒','contract':'口径契约','level_shift':'水位台阶'}
+LAYER_LABELS={'raw':'原始采集层','std':'标准类目层'}
+MODE_LABELS={'aggregate':'汇总复核','cohorts':'分层对比','details':'明细抽取','lineage':'血缘回溯'}
+PRIORITY_LABELS={'high':'高','medium':'中','low':'低'}
+
+
+def _label(mapping,key,fallback=None):
+    return mapping.get(key,str(key) if fallback is None else fallback)
+
+
+def _paths_text(paths):
+    """[[]] 读作「全站」。把 Python 字面量原样打进正文，读者只会看到 [[]]。"""
+    return '、'.join(dict.fromkeys('/'.join(p) if p else '全站' for p in paths)) or '全站'
+
+
+def _scope_text(units):
+    pick=lambda key:sorted({x for u in units for x in u.get(key,[]) or []})
+    parts=[('站点','、'.join(sorted({u['site'] for u in units}))),('平台','、'.join(pick('platforms'))),
+        ('数据层','、'.join(_label(LAYER_LABELS,x) for x in pick('source_layers'))),
+        ('路径','、'.join(dict.fromkeys(_paths_text(u['paths']) for u in units))),
+        ('事件月','、'.join(pick('event_months'))),('对照月','、'.join(pick('background_months')))]
+    return '；'.join(k+' '+v for k,v in parts if v)
+
+
+def _counts_text(counts,labels,unit='条'):
+    return '、'.join(_label(labels,k)+' '+str(v)+' '+unit for k,v in sorted(counts.items())) or '无'
+
+
+def _case_job_records(run,case):
+    """把本次定向取证的记录按范围认回议题。记录里没有 obligation_id，所以只能按范围认，
+    而范围必须整体匹配：站点、路径、数据层、路径层、月份缺一不可。
+    只比 (站点, 路径, 月份) 会把范围更宽的议题认走别人的记录——例如一个覆盖全部 31 个月、
+    全站 raw 的契约议题，会把某两个月、全站 std 的台阶议题查询算成自己的取证。
+    共用汇总被两个范围真正相同的议题同时算到不是错账，协议本就允许同 SQL 复用；
+    但范围不同就不算复用，是串账。"""
+    out=[]
+    for path in sorted((run.path/'records').glob('job-question-*.json')):
+        record=read(path);spec=record.get('scope_spec') or {}
+        for unit in case['scope_units']:
+            if (record.get('site')==unit['site'] and spec.get('paths')==unit['paths']
+                    and spec.get('path_layer')==unit.get('path_layer')
+                    and set(spec.get('source_layers') or [])<=set(unit.get('source_layers') or [])
+                    and set(record.get('months') or [])<=set(unit['months'])):
+                out.append(record);break
+    return out
+
+
+def _trail(run,case,checks_by_id,reading,queue_state):
+    """调查链路逐步从本次运行的记录里读出来，不靠人手写——手写的链路无法核对。"""
+    checks=[checks_by_id[cid] for cid in case.get('constraint_ids') or [] if cid in checks_by_id];steps=[]
+    if checks:
+        named=_counts_text(Counter(_label(FAMILY_LABELS,c['family'])+'·'+_label(RULE_LABELS,c['rule']) for c in checks),{})
+        layers=sorted({c['scope'].get('layer') for c in checks if c.get('scope',{}).get('layer')})
+        steps.append('客观检查失败：'+named+'；命中 '+'、'.join(sorted({c['site'] for c in checks}))
+            +' 的'+('、'.join(_label(LAYER_LABELS,x) for x in layers) or '全部层')
+            +'，月份 '+'、'.join(sorted({c['month'] for c in checks}))+'。')
+        partitions=sorted({c['site']+':'+c['family'] for c in checks})
+        unread=[p for p in partitions if p in set(reading.get('unread_partition_ids') or [])]
+        steps.append('全景判读：涉及 '+str(len(partitions))+' 个风险分区，'
+            +('全部已判读' if not unread else str(len(unread))+' 个尚未判读（'+'、'.join(unread)+'）')+'。')
+    stamp=str(case.get('registered_at') or '')[:10];rank=case.get('priority')
+    steps.append('立案：'+(stamp+' 登记' if stamp else '已登记')+('，优先级'+_label(PRIORITY_LABELS,rank) if rank else '')
+        +'，拆成 '+str(len(case.get('scope_units') or []))+' 个独立调查范围。')
+    records=_case_job_records(run,case)
+    if records:
+        ok=sum(1 for r in records if r.get('execution_status')=='success')
+        modes=Counter(_label(MODE_LABELS,r.get('mode')) for r in records)
+        detail=str(len(records))+' 次'+next(iter(modes)) if len(modes)==1 else _counts_text(modes,{},'次')+'，共 '+str(len(records))+' 次'
+        steps.append('定向取证：'+detail+'查询，'+('全部成功' if ok==len(records) else str(ok)+' 次成功')+'。')
+    else:
+        steps.append('定向取证：尚未对该议题发起定向查询。')
+    steps.append('当前进展：'+_counts_text(Counter(_label(QUEUE_LABELS,queue_state.get(oid,'未登记'))
+        for oid in case.get('obligation_ids') or []),{},'个范围')+'。')
+    return steps
+
+
 def render(run):
     from acceptance_observability import summarize, resume_state
     validation=validate(run,persist=False);state=case_status(run);cov=validation.get('coverage',{});inv=validation.get('investigation',{})
     index=panorama.load(run);cost=summarize(run);queue=resume_state(run)
     content=read(run.path/'report-content.json') if (run.path/'report-content.json').exists() else {'summary':['调查进行中；不能整体放行。'],'findings':[]}
-    lines=['# '+run.manifest['data_month']+' 大盘数据验收（全景与议题）','',
-        '执行状态：'+validation['execution_state']+'；业务结论：'+validation['business_verdict']+'。',
-        '',*content.get('summary',[]),'',
-        f"全景：{cov.get('query_states',{}).get('success',0)}/{cov.get('query_jobs',0)} 个聚合查询；{cov.get('panorama_reading',{}).get('complete',0)}/{cov.get('panorama_reading',{}).get('partitions',0)} 个风险分区已判读。",
-        f"事实：{index['fact_cells']} 个路径×月单元，{index['observed_cells']} 个有观测；无观测保留原状态。",
-        f"调查：{state['cases']} 个议题、{state['scope_units']} 个独立范围；{cost['investigation_assignments']} 次实际分派，{inv.get('reviewed',0)} 个范围经实质主审，{inv.get('verified',0)} 个范围已核实，{inv.get('blocked_external',0)} 个范围外部受阻。普通观察不形成待办。",
-        '队列状态：'+canonical({k:len(v) for k,v in queue['obligations_by_state'].items()})+'。',
-        f"取证成本：本运行及子包 {cost['actual_query_attempts']} 次实际请求，{cost['verified_observation_jobs_reused']} 个来源任务复用，{cost['shared_query_requests_reused']} 次同查询共享，{cost['query_retries_planned']} 次计划重试。详细口径见 execution-metrics.json；模型 token/费用未知。",'']
-    findings={f['case_id']:f for f in content.get('findings',[])}
+    # 门槛标识符对读者没有意义，归并后的类别数才有。逐条原文留在 validation.json。
+    gates=Counter(_label(GATE_LABELS,re.split(r'[:：]',e)[0]) for e in validation['errors'])
+    banner='**当前状态**：验收流程'+_label(STATE_LABELS,validation['execution_state'])+'，业务结论「'+_label(VERDICT_LABELS,validation['business_verdict'])+'」'
+    banner+='；还差 '+str(len(gates))+' 类事项，见文末「尚未完成的事项」。' if gates else '。'
+    lines=['# '+run.manifest['data_month']+' 大盘数据验收报告','',banner,'','## 本次结论','',
+        *['- '+str(x) for x in content.get('summary',[])],'']
+    checks_by_id={c['check_id']:c for c in index['constraints']}
+    reading=cov.get('panorama_reading',{});queue_state={oid:st for st,ids in queue['obligations_by_state'].items() for oid in ids}
+    findings={f['case_id']:f for f in content.get('findings',[])};evidence_index=[]
     for placement,title in [('main','重点问题'),('brief','补充核查'),('appendix','辅助观察')]:
         cases=[c for c in _registry(run)['cases'] if c['report_placement']==placement]
         if not cases:continue
@@ -1030,33 +1131,55 @@ def render(run):
             f=findings.get(c['case_id'],{});head=c.get('display_title') or c['business_question']
             lines += ['### '+head,'']
             if c['business_question']!=head:lines += [c['business_question'],'']
-            lines += [f.get('assessment','待调查；起因事实尚不能证明缺陷。'),'',
-                '范围：'+'；'.join(u['site']+' '+','.join(u['platforms'])+' '+','.join(u['event_months'])+' '+canonical(u['paths']) for u in c['scope_units'])]
-            for field,label in [('observation_change','观察变化'),('proven_error','已证错误影响'),('unresolved_quality_risk','未解决质量风险'),('counterevidence','反证与边界')]:
-                if f.get(field):lines += [label+'：'+(f[field] if isinstance(f[field],str) else canonical(f[field]))]
+            lines += ['**判断**：'+f.get('assessment','待调查；起因事实尚不能证明缺陷。'),'']
+            for field,label in [('observation_change','观察变化'),('proven_error','已证错误影响'),
+                    ('unresolved_quality_risk','未解决质量风险'),('counterevidence','反证与边界')]:
+                if f.get(field):lines += ['- **'+label+'**：'+(f[field] if isinstance(f[field],str) else canonical(f[field]))]
             for qty in f.get('quantities',[]) or []:
-                lines += ['量化影响（'+str(qty.get('metric'))+'，复算 '+str(qty.get('calculation_id'))+'）：'
-                          +str(qty.get('value'))+'　'+str(qty.get('statement'))]
+                lines += ['- **量化影响**（'+str(qty.get('metric'))+'）：'+str(qty.get('value'))+'　'+str(qty.get('statement'))
+                          +'（复算 '+str(qty.get('calculation_id'))+'）']
+            lines += ['- **适用范围**：'+_scope_text(c['scope_units']),
+                '- **下一核查**：'+f.get('next_check',c['next_check']),'- **停止条件**：'+c['stop_condition'],'']
+            if f.get('analysis'):
+                lines += ['**分析**','']+[str(i+1)+'. '+str(x) for i,x in enumerate(f['analysis'])]+['']
+            lines += ['**调查链路**','']
+            lines += [str(i+1)+'. '+s for i,s in enumerate(_trail(run,c,checks_by_id,reading,queue_state))]+['']
             if f.get('evidence_ids'):
-                lines += ['证据：'+'、'.join('['+eid+']('+str(run.path/'evidence'/(eid+'.json'))+')' for eid in f['evidence_ids'])]
-            lines += ['下一核查：'+f.get('next_check',c['next_check']), '停止条件：'+c['stop_condition'],'']
-    lines+=['## 检查覆盖与限制','',
-        '客观检查：'+canonical(cov.get('constraint_states',{}))+'；未归属失败 '+str(len(cov.get('unowned_failure_ids',[])))+'。',
-        '抽查、历史、内部与发布承接：'+canonical(cov.get('baseline_check_states',{}))+'。',
-        '待完成门槛：'+('、'.join(validation['errors']) or '无')]
+                # 十几行取证链接横在正文里就是一堵墙；正文只说有多少份，链接进附录。
+                # 附录标题不能重复业务问题原文——正文里它只应出现一次。
+                tag=title+' '+str(len(evidence_index)+1);evidence_index.append((tag,f['evidence_ids']))
+                lines += ['证据：'+str(len(f['evidence_ids']))+' 份取证记录，链接见文末附录「证据索引：'+tag+'」。','']
+    lines+=['## 尚未完成的事项','']
+    lines+=['- '+k+('（'+str(v)+' 项）' if v>1 else '') for k,v in sorted(gates.items())] or ['- 无；本次验收门槛已全部满足。']
     # A limitation denies an unreserved pass. Left unprinted, a run reads as
-    # undetermined with no gate named. 客观检查不可判定同时是待完成门槛（见上一行），
+    # undetermined with no gate named. 客观检查不可判定同时是待完成门槛（见上一节），
     # 所以这里不能笼统写「不阻断执行」——那与它自己列出的条目矛盾。
     stated=[x for x in validation['limitations'] if not isinstance(x,dict)]
     records=[x for x in validation['limitations'] if isinstance(x,dict)]
-    lines+=['已声明限制（不构成无保留通过；其中客观检查不可判定同时计入上方待完成门槛）：']
+    lines+=['','## 结论的保留','','已声明限制（不构成无保留通过；其中客观检查不可判定同时计入上一节）：']
     lines+=['- '+str(x) for x in stated]
     if records:
-        grouped=Counter(str(r.get('family'))+'/'+str(r.get('rule'))+' '+str(r.get('site')) for r in records)
-        lines+=['- 客观检查不可判定 '+str(len(records))+' 条：'+canonical(dict(sorted(grouped.items())))
-                +'；逐条 check_id 见 validation.json 的 limitations。']
+        grouped=Counter(_label(FAMILY_LABELS,r.get('family'))+'·'+_label(RULE_LABELS,r.get('rule'))+' '+str(r.get('site')) for r in records)
+        # 规则标识写一次：validation.json 里的条目就是按它归档的，只给中文名等于给了死链。
+        lines+=['- 客观检查不可判定 '+str(len(records))+' 条：'+_counts_text(grouped,{})+'。',
+                '  涉及规则标识 '+'、'.join(sorted({str(r.get('rule')) for r in records}))+'，逐条 check_id 见 validation.json 的 limitations。']
     if not validation['limitations']:lines+=['- 无']
-    lines+=['','各国金额分别保留本币。查询复用不是新查询，指纹相同也不代表事务快照。']
+    lines+=['','## 口径与边界','','- 各国金额分别保留本币，不做跨站点合计。',
+        '- 无观测的路径×月单元保留原状态，不按零处理。',
+        '- 查询复用不是新查询，指纹相同也不代表同一事务快照。',
+        '- 普通观察不形成待办；只有客观检查失败才立案。','',
+        '---','','## 附录：执行与核验记录','',
+        f"全景：{cov.get('query_states',{}).get('success',0)}/{cov.get('query_jobs',0)} 个聚合查询；{reading.get('complete',0)}/{reading.get('partitions',0)} 个风险分区已判读。",
+        f"事实：{index['fact_cells']} 个路径×月单元，{index['observed_cells']} 个有观测。",
+        f"调查：{state['cases']} 个议题、{state['scope_units']} 个独立范围；{cost['investigation_assignments']} 次实际分派，{inv.get('reviewed',0)} 个范围经实质主审，{inv.get('verified',0)} 个范围已核实，{inv.get('blocked_external',0)} 个范围外部受阻。",
+        '队列：'+_counts_text({k:len(v) for k,v in queue['obligations_by_state'].items()},QUEUE_LABELS,'个范围')+'。',
+        '客观检查：'+_counts_text(cov.get('constraint_states',{}),CHECK_STATE_LABELS)+'；未归属失败 '+str(len(cov.get('unowned_failure_ids',[])))+' 条。',
+        '抽查、历史、内部与发布承接：'+_counts_text(cov.get('baseline_check_states',{}),CHECK_STATE_LABELS)+'。',
+        f"取证成本：本运行及子包 {cost['actual_query_attempts']} 次实际请求，{cost['verified_observation_jobs_reused']} 个来源任务复用，{cost['shared_query_requests_reused']} 次同查询共享，{cost['query_retries_planned']} 次计划重试；模型 token/费用未知。",
+        '逐条门槛标识符见 validation.json 的 errors，取证口径见 execution-metrics.json，续跑状态见 resume.json。']
+    for head,ids in evidence_index:
+        lines+=['','### 证据索引：'+head,'',
+            '、'.join('['+eid[:11]+'…]('+str(run.path/'evidence'/(eid+'.json'))+')' for eid in ids)]
     (run.path/'报告.md').write_text('\n'.join(lines)+'\n')
     write(run.path/'execution-metrics.json',cost)
     write(run.path/'resume.json',{**queue,'case_registry_sha256':digest(_registry(run)),'scope_units':list(obligations(run)),

@@ -329,8 +329,10 @@ def main():
         elif args.command=='checkpoint':
             v=validate(run);render(run)
             from acceptance_observability import resume_state
+            # 续跑状态的权威文件是 render 刚写的 resume.json；这里只为本次存档再取一份快照。
+            # 不再另写 resume-state.json：它是 resume.json 的子集，且只在 checkpoint 时刷新，
+            # 之后每次 render 都会让它悄悄过期（实测出现过它写 2 个议题而运行已有 7 个）。
             resume=resume_state(run)
-            write(run.path/'resume-state.json',resume)
             event_id=run.event('investigation.checkpoint',execution_state=v['execution_state'],investigation=v.get('investigation'))
             write(run.path/'checkpoints'/(event_id+'.json'),{'validation':v,'report_sha256':digest((run.path/'报告.md').read_bytes()),'resume_sha256':digest(resume),'resume':resume,'note':'阶段存档，运行仍可继续；不代替最终核验或封存。'})
             print(json.dumps({'checkpoint':event_id,'final_delivery':False},ensure_ascii=False))

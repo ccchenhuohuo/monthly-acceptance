@@ -111,6 +111,11 @@ def create_run(base, skill, data_month, related=None):
     override = base / 'policy-overrides.json'
     if override.exists():
         policy = merge(policy, read(override))
+    # VERSION 与 RELEASE_VERSION 导入自同一个常量，看着像恒等式，其实不是：VERSION 是本模块
+    # 可被重绑定的"当前生效发布身份"，tests/legacy_fixture.py 会把它打成 3.3.0 来模拟旧包；
+    # RELEASE_VERSION 不被打桩，始终是真实发布号。两者相等 = 正以当前发布身份建新运行。
+    # 因此下面的 question_mode 与 `if not question_mode` 分支在生产恒为真/不可达，
+    # 只在旧包模拟下才会走另一侧——删掉它会让 55 个旧协议测试失败。
     question_mode = VERSION == RELEASE_VERSION or tuple(int(x) for x in VERSION.split('.')[:2]) >= (4, 0)
     if VERSION == RELEASE_VERSION and (policy.get('architecture') != ARCHITECTURE or policy.get('version') != RELEASE_VERSION):
         raise ValueError('当前版本与架构必须保持一致，不能用 override 回退分母')

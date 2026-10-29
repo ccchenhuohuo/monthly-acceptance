@@ -165,13 +165,12 @@
       "materiality",
       "investigation_workflow.max_unexplained_ratio",
       "investigation_workflow.max_unexplained_band_pp",
-      "case_workflow.business_classification",
-      "case_workflow.collection_priority_threshold",
-      "case_workflow.rule_mode",
+      "case_workflow",
       "machine_diagnostics"
     ],
     "shared_contract_versions": "当前运行、政策、问题合同、台账及覆盖协议统一为 0.0.2；历史格式常量仅用于读取旧冻结材料。",
-    "active_workflow": "architecture=panorama_questions；旧配置不能关闭当前议题协议。"
+    "active_workflow": "architecture=panorama_questions；旧配置不能关闭当前议题协议。",
+    "inert_in_current_architecture": "case_workflow 整块在 panorama_questions 下不生效：triage.enabled() 遇到议题模式直接返回 False，assign() 的案件队列分支另有 not question_workflow.enabled 的前置条件。保留它只为旧冻结包可读，把 enabled 改成 false 也不会改变当前架构的任何行为。"
   },
   "architecture": "panorama_questions"
 }

@@ -10,9 +10,19 @@
 
 当前 `render` 读取 `<RUN>/report-content.json`。`summary` 是字符串数组；`findings` 中每条绑定当前 `case_id`、`case_version` 和该议题的 `obligation_ids`，已主审结果与外部阻塞均须承接。报告位置由议题台账的 `report_placement: main / brief / appendix` 决定，不在报告里另外分类。
 
-每条 finding 使用 `assessment`、`observation_change`、`proven_error`、`unresolved_quality_risk`、`counterevidence`、`next_check`、`evidence_ids` 表达结论。观察变化、已证错误影响、未解决质量风险分别说明，不把同一观察金额重复当成错误与风险。身份与币种边界、正负抵消、基期和计算分母贴近相应数字。
+每条 finding 使用 `assessment`、`observation_change`、`proven_error`、`unresolved_quality_risk`、`counterevidence`、`next_check`、`evidence_ids` 表达结论，可选 `analysis`（字符串数组，按推理顺序排列的分析步骤）。观察变化、已证错误影响、未解决质量风险分别说明，不把同一观察金额重复当成错误与风险。身份与币种边界、正负抵消、基期和计算分母贴近相应数字。
 
-程序输出 `报告.md`、`execution-metrics.json`、`resume.json`；`checkpoint` 另保存续跑状态。当前全景与议题架构不生成旧版 `audit.html` 看板，也不使用旧 `candidate_ids`、`presentation`、原因解释率或 `case-acknowledge-review` 作为报告流程。七类检查的覆盖与能力限制来自全景和基础审核；若在摘要展开七类概览，必须引用实际结果，未查不写正常。
+`quantities` 是**唯一受程序强校验的字段**，可选但一旦填写就必须逐条给 `obligation_id`、`metric`、`calculation_id`、`value`、`statement`：这个数字必须就是已经过主审复算的那一条的结果，`calculation_id` 要落在该指标已审复算的集合里、`scope_role` 为 target、状态为 measured，数值不符即判门槛失败。字段细则见 [问题协议](question-workflow.md)。**还没走完主审复算的数字不要放进 `quantities`**，写进 `observation_change` 或 `proven_error` 的散文里即可——散文不体检，`quantities` 体检。
+
+## 面向读者的版式
+
+报告是给人读的，不是执行日志。正文只出现业务语言：状态机取值、队列计数、原始 JSON、门槛标识符和证据链接清单一律归入文末附录，或指向 `validation.json`、`execution-metrics.json`、`resume.json`。
+
+`summary` 每条一个重点，一句话说完再补一句支撑，`render` 按无序列表输出。每个议题依次给出：判断一句话、观察变化 / 已证错误影响 / 未解决质量风险 / 反证与边界 / 适用范围 / 下一核查 / 停止条件的分点、可选的 `analysis` 推理步骤，以及由 `render` 自动生成的**调查链路**——客观检查失败、全景判读、立案、定向取证、当前进展五步全部从本次运行的记录读出，不接受手写，手写的链路无法核对。
+
+门槛按类别归并成中文条目，不逐条打标识符；限制保留一次规则标识，使读者能回到 `validation.json` 对账。`[[]]` 读作「全站」，层、优先级、队列状态、检查族与规则一律用中文标签，未知取值原样透出而不静默丢弃。
+
+程序输出 `报告.md`、`execution-metrics.json`、`resume.json`；续跑状态的权威文件就是 `resume.json`，每次 `render` 刷新。`checkpoint` 另在 `checkpoints/<事件ID>.json` 存一份当次的不可变存档（含 validation、报告哈希与 resume 快照），不再单独写 `resume-state.json`。当前全景与议题架构不生成旧版 `audit.html` 看板，也不使用旧 `candidate_ids`、`presentation`、原因解释率或 `case-acknowledge-review` 作为报告流程。七类检查的覆盖与能力限制来自全景和基础审核，由 `render` 直接从本次运行的检查状态生成到文末附录，不需要也不接受手写概览：旧版的 `audit_overview` 字段当前渲染器**完全不读**，写进 `report-content.json` 会被静默忽略。要在 `summary` 里谈某一类检查，必须引用附录里的实际结果，未查的不写成正常。
 
 ## 完成度与业务使用
 
