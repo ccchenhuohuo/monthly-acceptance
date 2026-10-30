@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import q  # noqa: E402
+from ledger import caliber  # noqa: E402
 
 SKILL = q.SKILL
 SQL = SKILL / 'sql' / 'views'
@@ -70,16 +71,47 @@ def skill_version() -> dict:
             'dirty': bool(git('status', '--porcelain', '--', '.'))}
 
 
+PROJECT_FILES = ('config.yaml', '项目范围.md', 'scope.json', '已知缺陷台账.json', '服务商沟通台账.json', '准则裁定.md')
+
+
+def previous_run(base: Path) -> str | None:
+    """The latest earlier run of this skill generation that has a report; the one step 6 reconciles against."""
+    runs = []
+    for meta in base.glob('runs/*/*/run.json'):
+        try:
+            m = json.loads(meta.read_text())
+        except ValueError:
+            continue
+        if 'site_platforms' in m and (meta.parent / '报告.md').exists():
+            runs.append((m.get('created_at', ''), meta.parent))
+    return str(max(runs)[1].relative_to(base)) if runs else None
+
+
+def ledger_pids(inputs: Path) -> list[str]:
+    """Products to trace every run: known-defect objects plus the objects of vendor-ledger issues."""
+    pids = set()
+    for name, key in (('已知缺陷台账.json', None), ('服务商沟通台账.json', 'issues')):
+        p = inputs / name
+        if p.exists():
+            items = json.loads(p.read_text())
+            for item in items.get(key, []) if key else items:
+                pids |= {o['product_id'] for o in item.get('objects', []) if o.get('product_id')}
+    return sorted(pids)
+
+
 def init(month: str, base: Path) -> Path:
     config = load_config(base)
     stamp = datetime.now().strftime('%Y%m%d-%H%M')
+    last = previous_run(base)
     run = base / 'runs' / month / stamp
     run.mkdir(parents=True, exist_ok=False)
     inputs = run / 'inputs'
     inputs.mkdir()
-    for name in ('config.yaml', '项目范围.md', 'scope.json', '已知缺陷台账.json'):
+    for name in PROJECT_FILES:
         if (base / name).exists():
             shutil.copy2(base / name, inputs / name)
+    if (inputs / '服务商沟通台账.json').exists():
+        (inputs / '服务商口径.md').write_text(caliber(json.loads((inputs / '服务商沟通台账.json').read_text())))
     internal = base / '内部数据' / month
     if internal.is_dir() and any(internal.iterdir()):
         shutil.copytree(internal, inputs / '内部数据')
@@ -88,6 +120,7 @@ def init(month: str, base: Path) -> Path:
         'created_at': datetime.now().astimezone().isoformat(timespec='seconds'),
         'skill': skill_version(),
         'site_platforms': [{'site': s, 'platform': p, 'start': st} for s, p, st in site_platforms(config)],
+        'previous_run': last,
         'delivery_start': delivery(run, '00_delivery_start'),
         'release': latest_release(run),
     }
@@ -105,9 +138,7 @@ def plan(run: Path) -> list[dict]:
     brands = list(config.get('本品品牌', [])) + list(config.get('本品杂音品牌', []))
     common = {'START': start, 'END': end, 'RECENT_FROM': recent, 'MONTH': end, 'PREV': shift(end, -1), 'YOY': shift(end, -12),
               'RELEASE': meta['release']['release_id'], 'SEED': f'acceptance-{end}'}
-    ledger = run / 'inputs' / '已知缺陷台账.json'
-    pids = sorted({o['product_id'] for item in json.loads(ledger.read_text())
-                   for o in item.get('objects', [])}) if ledger.exists() else []
+    pids = ledger_pids(run / 'inputs')
     # Every query scans the whole table whatever its site filter, so each view runs
     # once over all sites; only the churn view runs twice, once per comparison lag.
     single = ['01_fingerprint', '02_std_grid', '04_price_bands', '05_price_jumps', '05_price_jump_counts',

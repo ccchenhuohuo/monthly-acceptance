@@ -3,9 +3,12 @@
 
 Pulls the Feishu Base named in config (类目树、类目定义与机判规则、适用标签、
 特殊 SPU 命名规则、说明文档) with lark-cli, keeps the raw export, and writes
-标准/判定标准.md — the text a reviewer judges tagging against.
+标准/判定标准.md — the text a reviewer judges tagging against. Rulings agreed
+with the vendor after the Base was written (验收/准则裁定.md, frozen into the run
+at init) are appended as the last section and override the definitions' wording.
 
     python3 taxonomy.py RUN
+    python3 taxonomy.py RUN --rulings-only    # re-append the rulings to a standard frozen earlier
 """
 from __future__ import annotations
 
@@ -38,11 +41,28 @@ def first(v):
     return v[0] if isinstance(v, list) and v else v
 
 
+RULINGS = '\n## 准则裁定（项目侧，优先于上面的定义字面）\n'
+
+
+def append_rulings(run: Path) -> int:
+    """Append the frozen 准则裁定.md to 判定标准.md, replacing any earlier copy; returns the number of rulings."""
+    src, std = run / 'inputs' / '准则裁定.md', run / 'inputs' / '标准' / '判定标准.md'
+    if not src.exists() or not std.exists():
+        return 0
+    body = src.read_text().split('\n', 1)[-1].strip()   # drop the file's own title
+    std.write_text(std.read_text().split(RULINGS)[0].rstrip('\n') + '\n' + RULINGS + '\n' + body + '\n')
+    return sum(1 for line in body.splitlines() if line.startswith('| K'))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('run', type=Path)
+    ap.add_argument('--rulings-only', action='store_true', help='只把准则裁定重新追加到已冻结的判定标准')
     a = ap.parse_args()
     run = a.run.resolve()
+    if a.rulings_only:
+        print(f'追加 {append_rulings(run)} 条准则裁定 → {run / "inputs" / "标准" / "判定标准.md"}')
+        return
     cfg = load_config(run / 'inputs')['品类标签体系']
     out = run / 'inputs' / '标准'
     out.mkdir(parents=True, exist_ok=True)
@@ -92,10 +112,12 @@ def main():
                      str(first(r.get('沿用or新建')) or ''), r.get('备注') or '']
             lines.append('| ' + ' | '.join(str(c).replace('\n', ' ').replace('|', '/') for c in cells) + ' |')
     (out / '判定标准.md').write_text('\n'.join(lines) + '\n')
+    rulings = append_rulings(run)
     (out / 'manifest.json').write_text(json.dumps({
         'fetched_at': datetime.now().astimezone().isoformat(timespec='seconds'), 'base_token': cfg['base_token'],
-        'revisions': rev, 'leaves': len(tree), 'naming_rules': len(naming)}, ensure_ascii=False, indent=2) + '\n')
-    print(f"{len(tree)} 个叶子、{len(naming)} 条命名规则 → {out / '判定标准.md'}")
+        'revisions': rev, 'leaves': len(tree), 'naming_rules': len(naming), 'rulings': rulings},
+        ensure_ascii=False, indent=2) + '\n')
+    print(f"{len(tree)} 个叶子、{len(naming)} 条命名规则、{rulings} 条准则裁定 → {out / '判定标准.md'}")
 
 
 if __name__ == '__main__':

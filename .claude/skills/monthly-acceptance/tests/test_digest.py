@@ -134,3 +134,28 @@ def test_spu_impacts_do_not_call_a_flat_category_dominated():
                       {**base, 'product_id': 'old', 'units_prev': 115, 'units_cur': 6, 'amount_prev': 1150.0, 'amount_cur': 60.0}])
     rows = {r[1]: r[-1] for r in digest.spu_impacts(c, g)}
     assert rows == {'new': '单品大幅变动', 'old': '单品大幅变动'}   # +1% category: offsetting swings, not dominance
+
+
+def test_vendor_reconciliation_lists_last_report_items_open_issues_and_the_freeze(tmp_path):
+    import json
+    base = tmp_path / '验收'
+    prev = base / 'runs' / '2026-09' / 'a'
+    prev.mkdir(parents=True)
+    (prev / '报告.md').write_text('# 报告\n\n## 需服务商核对的事项\n\n1. **父体编号**：请说明。\n\n## 与历史的对照\n\n- 一致\n')
+    run = base / 'runs' / '2026-10' / 'b'
+    (run / 'inputs' / '服务商').mkdir(parents=True)
+    (run / 'views').mkdir()
+    (run / 'inputs' / '服务商沟通台账.json').write_text(json.dumps({'issues': [
+        {'id': 'Q25', 'raised': '2026-09-04', 'scope': 'JP', 'issue': '冲高', 'status': '服务商称已修复',
+         'objects': [{'site': 'JP', 'product_id': 'B0FYM1KFRH'}]},
+        {'id': 'Q26', 'raised': '2026-09-16', 'scope': 'cn', 'issue': '618', 'status': '已说明', 'objects': []}]}, ensure_ascii=False))
+    (run / 'inputs' / '服务商' / 'manifest.json').write_text(json.dumps({'chats': {'oc_1': {
+        'name': '问题群', 'since': '2026-10-30T14:10:00+08:00', 'until': '2026-11-10T09:00:00+08:00', 'messages': 3}}, 'errors': []}, ensure_ascii=False))
+    digest.RUN, digest.VIEWS, digest.OUT = run, run / 'views', run / 'digest'
+    digest.OUT.mkdir()
+    digest.META = {'month': '2026-10', 'previous_run': 'runs/2026-09/a'}
+    digest.vendor_reconciliation()
+    text = (run / 'digest' / '对照_服务商.md').read_text()
+    assert '父体编号' in text and '与历史的对照' not in text
+    assert 'Q25' in text and 'B0FYM1KFRH 未观测' in text and 'Q26' not in text
+    assert '| 问题群 | 2026-10-30 14:10 | 2026-11-10 09:00 | 3 |' in text
