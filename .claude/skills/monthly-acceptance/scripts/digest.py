@@ -14,6 +14,7 @@ import csv
 import json
 import math
 import re
+import unicodedata
 from pathlib import Path
 
 import pandas as pd
@@ -449,8 +450,99 @@ def spu_impacts(c: pd.DataFrame, g: pd.DataFrame, limit: int = 10) -> list[list]
     return [f[1] for f in found[:limit]]
 
 
+# 下游按小类、按金额用数（季报、份额、品牌排名），下面几张表在同样的粒度上看：一级类目或站点级的汇总会把小类里的问题平均掉。
+
+def leaf_name(r) -> str:
+    return f"{r['l1']} > {r['l3']}" if r['l2'] == r['l3'] else f"{r['l1']} > {r['l2']} > {r['l3']}"
+
+
+def title_of(r) -> str:
+    return text(r.get('title_cn')) or text(r.get('title_raw'))
+
+
+def window_amount(items: pd.DataFrame) -> float:
+    """Focus amount of one site × platform over the window of 22_leaf_items, counting every leaf once."""
+    return float(items.drop_duplicates(['l1', 'l2', 'l3']).leaf_amount.sum()) if len(items) else 0.0
+
+
+def leaf_dominance(items: pd.DataFrame, limit: int = 30) -> list[list]:
+    """SPUs holding ≥15% of their leaf's amount, whether or not the leaf moved. ≥50% and priced-out or off-root ones are
+    listed whatever the leaf's size (US 运动相机补光灯 is 0.03% of the US); other 15%–50% only in leaves worth ≥0.05%."""
+    total = window_amount(items)
+    found = []
+    for r in items.to_dict('records'):
+        la = r['leaf_amount']
+        if not la or r['amount'] < 0.15 * la:
+            continue
+        s = r['amount'] / la
+        pr = r['price'] / r['leaf_median'] if r['leaf_median'] else None
+        odd = []
+        if pr is not None and pr >= 10:
+            odd.append('单价≥小类中位数10倍')
+        if r['c1'] != r['main_root']:
+            odd.append('平台根节点与小类主体不同')
+        # A small leaf is still a leaf downstream reports on; only unmarked 15%–50% rows need the size floor.
+        if s < 0.5 and not odd and total and la < 0.0005 * total:
+            continue
+        marks = (['撑起小类'] if s >= 0.5 else []) + odd
+        found.append((0 if odd else (1 if s >= 0.5 else 2), -r['amount'], [
+            leaf_name(r), r['product_id'], text(r['brand']), title_of(r)[:40], tail_path(text(r['platform_path']), 2),
+            num(r['units']), money(r['amount']), share(s), share(la / total if total else None), price(r['price']),
+            price(r['leaf_median']), '；'.join(marks)]))
+    found.sort(key=lambda x: (x[0], x[1]))
+    return [f[2] for f in found[:limit]]
+
+
+def price_outliers(items: pd.DataFrame, extreme: int = 20, high: int = 10, per_leaf: int = 2,
+                   residual: int = 10) -> tuple[list[list], list[list]]:
+    """SPUs priced ≥20× their leaf's median. A price wrong from the start never jumps month to month, so only a
+    comparison with peers catches it. Named leaves: ≥50× by ratio, then 20–50× by excess amount as a share of the
+    leaf, at most two per leaf. A '-其他' leaf mixes unlike products (cables beside SSDs and TVs), so its median
+    means little: its SPUs are listed apart, and only those worth ≥1% of the leaf (a camera kit in 运动相机配件-其他)."""
+    named, resid = [], []
+    for r in items.to_dict('records'):
+        med, la = r['leaf_median'], r['leaf_amount']
+        if not med or not la or r['leaf_spus'] < 5 or r['price'] < 20 * med:
+            continue
+        x = r['price'] / med
+        es = (r['amount'] - r['units'] * med) / la
+        row = [leaf_name(r), r['product_id'], text(r['brand']), title_of(r)[:40], num(r['units']), price(r['price']),
+               price(med), f'{x:.0f}', share(es), share(r['amount'] / la)]
+        if r['l3'].endswith('-其他'):
+            if r['amount'] >= 0.01 * la:
+                resid.append((es, row))
+        else:
+            named.append((x, es, (r['l1'], r['l2'], r['l3']), row))
+    out, seen = [], {}
+    for part, cap in ((sorted([x for x in named if x[0] >= 50], key=lambda x: -x[0]), extreme),
+                      (sorted([x for x in named if x[0] < 50], key=lambda x: -x[1]), high)):
+        kept = 0
+        for x in part:
+            if kept == cap:
+                break
+            if seen.get(x[2], 0) < per_leaf:
+                seen[x[2]] = seen.get(x[2], 0) + 1
+                out.append(x[3])
+                kept += 1
+    return out, [x[1] for x in sorted(resid, key=lambda x: -x[0])[:residual]]
+
+
+def off_root_items(items: pd.DataFrame, limit: int = 25) -> list[list]:
+    """SPUs under a platform root that carries <10% of their leaf, each ≥1% of it: an instrument case among camera
+    cases, a computer part among camera accessories. Leaves that legitimately span two roots stay out."""
+    rows = []
+    for r in items.to_dict('records'):
+        la = r['leaf_amount']
+        if not la or r['c1'] == r['main_root'] or r['root_amount'] >= 0.10 * la or r['amount'] < 0.01 * la:
+            continue
+        rows.append((r['amount'] / la, [leaf_name(r), text(r['main_root']), r['product_id'], text(r['brand']), title_of(r)[:40],
+                                        tail_path(text(r['platform_path']), 4), share(r['amount'] / la), share(r['root_amount'] / la)]))
+    rows.sort(key=lambda x: -x[0])
+    return [x[1] for x in rows[:limit]]
+
+
 def module_04():
-    grid, conc = read('02_std_grid'), read('21_spu_concentration', required=False)
+    grid, conc, items = read('02_std_grid'), read('21_spu_concentration', required=False), read('22_leaf_items', required=False)
     end = META['month']
     body = []
     for site, platform, _ in sps():
@@ -469,6 +561,10 @@ def module_04():
             ['一级类目', 'product_id', '品牌', '标题', '平台路径末两级', '件 上月→本月', '额 上月→本月', '占类目件/额（本月）',
              '占类目Δ件', '占类目Δ额', '类目额环比', '剔除该商品后', '标记'], spu_impacts(c, g)) if len(conc) else
             '缺少视图 21_spu_concentration（先跑 views.py run --only 21）。\n'))
+        it = items[(items.site == site) & (items.platform == platform)] if len(items) else items
+        body.append(f'### 单品对小类的影响（{shift(end, -2)} ~ {end} 合计，按金额）\n\n' + (table(
+            ['小类', 'product_id', '品牌', '标题', '平台路径末两级', '件', '额', '占小类额', '小类占本站额', '单价', '小类单价中位数', '标记'],
+            leaf_dominance(it)) if len(items) else '缺少视图 22_leaf_items（先跑 views.py run --only 22）。\n'))
     write('04_类目贡献与异常.md', '标准类目变化贡献与全历史异常', '\n'.join(body), intro='''
 贡献 = 子类变化 / 父类变化，正负有意义、可超过 100%；父类变化接近零时不按比值排名，看绝对变化与抵消。
 拉动父类增长 = 子类变化 / 父类基期。贡献只定位变化，不证明是错误。
@@ -477,13 +573,17 @@ def module_04():
 单品对一级类目的影响：列出本月占类目件或额 ≥10% 的 SPU 和带标记的 SPU。主导类目环比 = 类目环比动了 ≥5%，其中一半以上来自这一个 SPU
 （且它的变化达到类目体量 2%）；单品大幅变动 = 类目没被它主导，但它自己的变化达到类目体量 5%（常与另一个 SPU 反向抵消，先查是不是换了身份）。
 “剔除该商品后”是两期都去掉它的类目额环比，属敏感性分析，不是修正值。被标记的商品先核对标题、品牌、平台路径说的是不是同一件商品，
-再看量价——价格变化不到 3 倍时跳价检查拦不下它。''')
+再看量价——价格变化不到 3 倍时跳价检查拦不下它。
+单品对小类的影响：近三个月占小类金额 ≥15% 的 SPU，不看涨跌——错分是静态的，类目不动也在。≥50% 的“撑起小类”不论小类大小都列；
+15%–50% 只列占本站 ≥0.05% 的小类。单价远高于小类中位数、或挂在小类主体以外的平台根节点下的排在前面：先看标题，
+是不是整机套装进了配件叶、别的品类混了进来。''')
 
 
 # ---------- 05 价格 ----------
 
 def module_05():
     jumps, counts, bands, fp = read('05_price_jumps'), read('05_price_jump_counts'), read('04_price_bands'), read('01_fingerprint')
+    items = read('22_leaf_items', required=False)
     end = META['month']
     body = []
     for site, platform, start in sps():
@@ -509,6 +609,15 @@ def module_05():
                          num(r['units']), f"{r['impact']:+,.0f}", flag])
         body.append('### 影响最大的跳价（全历史，按 |价差×件数| 排前 20）\n\n' +
                     table(['月', 'product_id', 'sku_id', '叶子', '品牌', '标题', '上月价→本月价', '倍数', '件', '隐含影响', ''], rows))
+        it = items[(items.site == site) & (items.platform == platform)] if len(items) else items
+        if len(items):
+            named, resid = price_outliers(it)
+            cols = ['小类', 'product_id', '品牌', '标题', '件', '均价', '小类中位数', '倍数', '超额占小类额', '占小类额']
+            body.append(f'### 跟同类比的离群价（{shift(end, -2)} ~ {end} 合计；均价 ÷ 小类中位数，≥50 倍按倍数排前 20，'
+                        '20–50 倍按超额占小类额排前 10，每个小类最多 2 条）\n\n' + table(cols, named))
+            body.append(f'### 残差叶（“-其他”）里的离群价（同期；≥20 倍且占该残差叶金额 ≥1%）\n\n' + table(cols, resid))
+        else:
+            body.append('### 跟同类比的离群价\n\n缺少视图 22_leaf_items（先跑 views.py run --only 22）。\n')
         b = bands[(bands.site == site) & (bands.platform == platform)] if len(bands) else bands
         body.append('### 价格带迁移（最新月对环比、同比基期，SPU 或金额份额变动 ≥10pp，路径两期都 ≥30 个 SPU）\n\n' +
                     table(['比较', '层级', '路径', '价格带', 'SPU份额 基期→本期', '金额份额 基期→本期'], band_shifts(b)))
@@ -518,7 +627,10 @@ def module_05():
     write('05_价格.md', '价格', '\n'.join(body), intro='''
 跳价 = 同一 SKU 相邻两月到手价涨到 3 倍以上或跌到 1/3 以下（先取前值后过滤）。恰好约 10 倍优先怀疑位数错误；≥50 倍多为占位价；
 带外高价先看标题与品牌，排除“真贵货”再判错价、错币种、错单位。金额 = 到手价 × 件数，一个高销商品的错价能扭曲整条路径的金额。
-价格带边界取自治理层价格带策略（按币种），SPU 价格 = 该 SPU 在该路径下的到手金额 / 件数。''')
+价格带边界取自治理层价格带策略（按币种），SPU 价格 = 该 SPU 在该路径下的到手金额 / 件数。
+跳价只能抓“变了”的价格；一开始就错、一直没变的价格要跟同类比：离群价 = 近三个月到手均价是所在小类 SPU 均价中位数的 20 倍以上
+（小类至少 5 个 SPU）。先看标题排除真贵货与错分的整机，剩下的按占位价、位数错误核实；超额 = 金额 − 件数 × 中位数，是错价最多能扭曲的金额，
+按它占小类金额的比例排，大叶子里的真贵货就不会把小叶子里的错分挤出去。“-其他”叶里品类混杂，中位数不代表同类，单列，只看占该叶 ≥1% 的。''')
 
 
 def band_shifts(b: pd.DataFrame) -> list[list]:
@@ -545,8 +657,150 @@ def band_shifts(b: pd.DataFrame) -> list[list]:
 
 # ---------- 07 品牌 ----------
 
+# 品牌清洗本身也要核对：标准品牌是服务商把原始品牌归并出来的，归错了，品牌份额就整片错，而“有没有品牌名”的检查看不出来。
+
+NON_BRAND = {'中性', '无', '无品牌', '通用', '其他', '其它', '杂牌', '无牌', '未知', '原厂', '定制', 'oem', 'generic', 'unbranded',
+             'neutral', 'none', 'null', 'na', 'nobrand', 'unknown'}
+CATEGORY_WORDS = ('配件', '用品', '设备', '器材', '周边', '电子电工')
+DECORATIONS = ('官方旗舰店', '旗舰店', '官方', '专营店', '专卖店', 'officialstore', 'official', 'store', 'shop', 'direct', 'japan', 'global')
+
+
+def brand_key(s) -> str:
+    """Case, width and punctuation folded: 'Peak Design', 'peak design' and 'PEAK-DESIGN' share one key."""
+    s = unicodedata.normalize('NFKC', text(s)).lower()
+    return re.sub(r"[\s\-_.·・&'’\"()（）,，!！]", '', s)
+
+
+def brand_parts(s) -> set:
+    """'English/中文' and Japan's 'カタカナ(Latin)' are both one brand written two ways."""
+    return {k for k in (brand_key(x) for x in re.split(r'[/／()（）]', text(s))) if k}
+
+
+def raw_matches(raw, std) -> bool:
+    """Whether a raw brand plausibly is the standard brand it was cleaned into. A standard name reads 'English/中文';
+    the raw brand, shop decorations removed, must equal or share a part, or a part must make up most of it.
+    'Rockville' → ROCK/洛克 fails: a short name found inside a longer, different one is how unrelated brands get merged."""
+    r, parts = brand_key(raw), brand_parts(std)
+    for d in DECORATIONS:
+        if r.endswith(d) and len(r) > len(d):
+            r = r[:-len(d)]
+    if not r or not parts:
+        return True
+    if r in parts or brand_parts(raw) & parts:
+        return True
+    return any(len(x) >= 3 and x in r and len(x) / len(r) >= 0.6 for x in parts)
+
+
+def brand_mismatches(pairs: pd.DataFrame, own: set, limit: int = 25) -> list[list]:
+    """Standard brands whose amount partly comes from raw brands that are not them, largest mismatched amount first.
+    Own-brand variants are mapped on purpose and left out."""
+    p = pairs[~pairs.brand.isin([OTHERS_BRAND, '']) & ~pairs.brand.isin(own) & (pairs.raw_brand.fillna('') != '')]
+    rows = []
+    for brand, g in p.groupby('brand'):
+        bad = g[[not raw_matches(x, brand) for x in g.raw_brand]].sort_values('amount', ascending=False)
+        if not len(bad):
+            continue
+        rows.append((bad.amount.sum(), [brand, '；'.join(f"{r['raw_brand']} {money(r['amount'])}" for r in bad.head(5).to_dict('records')),
+                                         len(bad), money(bad.amount.sum()), share(bad.amount.sum() / g.amount.sum())]))
+    rows.sort(key=lambda x: -x[0])
+    return [x[1] for x in rows[:limit]]
+
+
+def named_in_others(pairs: pd.DataFrame, limit: int = 10) -> list[list]:
+    p = pairs[(pairs.brand == OTHERS_BRAND) & (pairs.raw_brand.fillna('') != '')].sort_values('amount', ascending=False)
+    return [[r['raw_brand'], num(r['spus']), num(r['units']), money(r['amount'])] for r in p.head(limit).to_dict('records')]
+
+
+def brand_splits(pairs: pd.DataFrame, limit: int = 20) -> list[list]:
+    """One raw brand cleaned into several standard names, within a site or across sites ('Logitech' → G/罗技 and LOGICOOL)."""
+    p = pairs[~pairs.brand.isin([OTHERS_BRAND, '']) & (pairs.raw_brand.fillna('') != '')]
+    p = p.assign(key=[brand_key(x) for x in p.raw_brand])
+    rows = []
+    for _, g in p.groupby('key'):
+        names = g.groupby('brand').agg(units=('units', 'sum'), spus=('spus', 'sum'), sites=('site', lambda s: '、'.join(sorted(set(s)))))
+        names = names[(names.spus >= 2) | (names.units >= 50)].sort_values('units', ascending=False)
+        if len(names) < 2:
+            continue
+        rows.append((names.units.sum(), [g.raw_brand.iloc[0], '；'.join(f"{b}（{r['sites']}，{num(r['units'])} 件）" for b, r in names.iterrows())]))
+    rows.sort(key=lambda x: -x[0])
+    return [x[1] for x in rows[:limit]]
+
+
+KATAKANA = re.compile(r'^[\u30A0-\u30FF\u31F0-\u31FF\uFF65-\uFF9F\s]+$')
+
+
+def brand_variants(pairs: pd.DataFrame, limit: int = 20) -> tuple[list[list], list[list]]:
+    """Standard names that differ only in case or punctuation, and katakana-only standard names (often a foreign brand
+    transliterated in one site and spelled in Latin elsewhere: ピークデザイン vs Peak Design)."""
+    s = pairs[~pairs.brand.isin([OTHERS_BRAND, ''])].groupby(['brand', 'site'], as_index=False).agg(units=('units', 'sum'), amount=('amount', 'sum'))
+    s = s.assign(key=[brand_key(x) for x in s.brand])
+    dup = []
+    for key, g in s.groupby('key'):
+        if g.brand.nunique() > 1:
+            dup.append((g.units.sum(), [key, '；'.join(f"{r['brand']}（{r['site']}，{num(r['units'])} 件）"
+                                                     for r in g.sort_values('units', ascending=False).to_dict('records'))]))
+    dup.sort(key=lambda x: -x[0])
+    kata = s[[bool(KATAKANA.match(text(x))) for x in s.brand]].sort_values('units', ascending=False)
+    return [x[1] for x in dup[:limit]], [[r['brand'], r['site'], num(r['units']), money(r['amount'])] for r in kata.head(limit).to_dict('records')]
+
+
+def non_brands(pairs: pd.DataFrame, categories: set, limit: int = 20) -> list[list]:
+    """Standard names that are not brands: '中性', '无', or a category word such as '数码配件'."""
+    def odd(name):
+        parts = [x for x in re.split(r'[/／]', text(name)) if x.strip()]
+        return any(brand_key(x) in NON_BRAND or x.strip() in categories or x.strip().endswith(CATEGORY_WORDS) for x in parts)
+    s = pairs[~pairs.brand.isin([OTHERS_BRAND, ''])].groupby(['brand', 'site', 'platform'], as_index=False).agg(
+        spus=('spus', 'sum'), units=('units', 'sum'), amount=('amount', 'sum'))
+    s = s[[odd(x) for x in s.brand]].sort_values('units', ascending=False)
+    return [[r['brand'], label(r['site'], r['platform']), num(r['spus']), num(r['units']), money(r['amount'])] for r in s.head(limit).to_dict('records')]
+
+
+def others_by_l2(lb: pd.DataFrame, limit: int = 20) -> list[list]:
+    """OTHERS share of amount by level-2 category, last three months against the same months a year earlier. The site-wide
+    share averages one category's lost brands away (Tmall 2026-09: 1.6% overall while 摄影补光灯 went from 2.6% to 20.7%)."""
+    leaf = lb.drop_duplicates(['l1', 'l2', 'l3', 'period'])
+    tot = leaf.groupby(['l1', 'l2', 'period']).leaf_amount.sum().to_dict()
+    oth = lb[lb.brand == OTHERS_BRAND].groupby(['l1', 'l2', 'period']).amount.sum().to_dict()
+    site_total = leaf[leaf.period == 'cur'].leaf_amount.sum()
+    rows = []
+    for l1, l2 in sorted({(a, b) for a, b, per in tot if per == 'cur'}):
+        cur_t = tot.get((l1, l2, 'cur'), 0)
+        if not cur_t or (site_total and cur_t < 0.001 * site_total):
+            continue
+        s_cur = oth.get((l1, l2, 'cur'), 0) / cur_t
+        yoy_t = tot.get((l1, l2, 'yoy'))
+        s_yoy = oth.get((l1, l2, 'yoy'), 0) / yoy_t if yoy_t else None
+        marks = (['≥30%'] if s_cur >= 0.30 else []) + (['同比 +10pp 以上'] if s_yoy is not None and s_cur >= 0.10 and s_cur - s_yoy >= 0.10 else [])
+        if marks:
+            rows.append((oth.get((l1, l2, 'cur'), 0), [l1 if l1 == l2 else f'{l1} > {l2}', money(cur_t), share(s_cur), share(s_yoy),
+                                                        pp(s_cur - s_yoy) if s_yoy is not None else '—', '；'.join(marks)]))
+    rows.sort(key=lambda x: -x[0])
+    return [x[1] for x in rows[:limit]]
+
+
+def leaf_top_brands(lb: pd.DataFrame, min_share: float = 0.001) -> list[list]:
+    """Each leaf's top five brands by amount over the last three months, to judge whether they belong in the leaf
+    (computer-monitor makers ranking in a camera-monitor leaf)."""
+    cur = lb[lb.period == 'cur']
+    leaves = cur.drop_duplicates(['l1', 'l2', 'l3'])
+    total = leaves.leaf_amount.sum()
+    rows = []
+    for r in leaves.sort_values('leaf_amount', ascending=False).to_dict('records'):
+        if total and r['leaf_amount'] < min_share * total:
+            continue
+        g = cur[(cur.l1 == r['l1']) & (cur.l2 == r['l2']) & (cur.l3 == r['l3'])]
+        top = g[g.brand != OTHERS_BRAND].sort_values('amount', ascending=False).head(5)
+        rows.append([leaf_name(r), share(r['leaf_amount'] / total if total else None),
+                     '；'.join(f"{text(b['brand']) or '（空）'} {share(b['amount'] / r['leaf_amount'])}" for b in top.to_dict('records')),
+                     share(g[g.brand == OTHERS_BRAND].amount.sum() / r['leaf_amount'])])
+    return rows
+
+
 def module_07():
     brands, grid, cov = read('08_brands'), read('02_std_grid'), read('16_gov_coverage', required=False)
+    pairs, lb, own = read('23_brand_map', required=False), read('24_leaf_brands', required=False), read('14_own_brand', required=False)
+    own = set(own.brand) if len(own) else set()
+    window = f"{shift(META['month'], -2)} ~ {META['month']}"
     end = META['month']
     prev_m, yoy_m = shift(end, -1), shift(end, -12)
     trend = months_between(shift(end, -12), end)
@@ -609,10 +863,37 @@ def module_07():
             rows.append([cat, '；'.join(f"{r['brand']} {share(r['units'] / tot['units'])}" for r in by_u.to_dict('records')),
                          '；'.join(f"{r['brand']} {share(r['amount'] / tot['amount'])}" for r in by_a.to_dict('records'))])
         body.append(f'### {end} 各一级类目前五品牌（件数、金额双口径）\n\n' + table(['类目', '按件数', '按金额'], rows))
+        pp_ = pairs[(pairs.site == site) & (pairs.platform == platform)] if len(pairs) else pairs
+        if len(pp_):
+            body.append(f'### 原始品牌 → 标准品牌对不上（{window}，按对不上的金额）\n\n' + table(
+                ['标准品牌', '对不上的原始品牌（金额，前 5）', '个数', '对不上合计', '占该标准名金额'], brand_mismatches(pp_, own)))
+            body.append(f'### 有名字的原始品牌被归进 OTHERS/其他（{window}，金额前 10）\n\n' + table(
+                ['原始品牌', 'SPU', '件', '额'], named_in_others(pp_)))
+        lbs = lb[(lb.site == site) & (lb.platform == platform)] if len(lb) else lb
+        if len(lbs):
+            body.append(f'### 二级类目 OTHERS/其他 金额占比（{window} 对上年同期；占本站 ≥0.1% 的类目，≥30% 或同比 +10pp 以上）\n\n' + table(
+                ['二级类目', '额（近三个月）', 'OTHERS 占比', '上年同期', '变化', '标记'], others_by_l2(lbs)))
+            body.append(f'### 各小类金额前五品牌（{window}；小类金额 ≥ 本站关注额 0.1%）\n\n' + table(
+                ['小类', '占本站额', '前五品牌（占小类额）', 'OTHERS'], leaf_top_brands(lbs)))
+    if len(pairs):
+        categories = set(grid.l1) | set(grid.l2) | set(grid.l3)
+        dup, kata = brand_variants(pairs)
+        body.append(f'## 跨站点：同一原始品牌对应多个标准名（{window}）\n\n' + table(['原始品牌', '标准名（站点，件）'], brand_splits(pairs)))
+        body.append(f'## 跨站点：标准名只差大小写或标点（{window}）\n\n' + table(['归一后的写法', '标准名（站点，件）'], dup))
+        body.append(f'## 跨站点：只用片假名的标准名（{window}，件数前 20）\n\n多数是日本本土品牌；要找的是外国品牌在日本站被音译成另一个名字（ピークデザイン 与其他站的 Peak Design），同一品牌因此分成两个标签。\n\n' +
+                    table(['标准名', '站点', '件', '额'], kata))
+        body.append(f'## 不像品牌的标准名（{window}）\n\n' + table(['标准名', '站点/平台', 'SPU', '件', '额'], non_brands(pairs, categories)))
+    else:
+        body.append('## 品牌清洗核对\n\n缺少视图 23_brand_map（先跑 views.py run --only 23）。\n')
     write('07_品牌.md', '品牌层', '\n'.join(body), intro='''
 品牌层是独立的一层：类目正常时单个品牌的轨迹仍可能完全是数据造成的。OTHERS/其他 不是品牌，不排名、不做趋势解读，
 但它的占比上升说明品牌归一化退化、具名品牌份额被系统性低估。份额只在单站点内比较，件数与金额必须并列（件数口径抬高低价品牌）。
-背离后用 sql/drill/brand_churn.sql 拆新增/留存/消失：增量来自新商品 = 覆盖变化；同一批留存商品大涨 = 真实起量或估算调整，最需警惕。''')
+背离后用 sql/drill/brand_churn.sql 拆新增/留存/消失：增量来自新商品 = 覆盖变化；同一批留存商品大涨 = 真实起量或估算调整，最需警惕。
+标准品牌是服务商把原始品牌归并出来的，归并本身要核对：“对不上”= 原始品牌去掉店铺后缀后，既不等于也不包含标准名的任何一部分
+（Rockville 进了 ROCK/洛克 这种短名字被长名字包含的，是按子串归并的典型），本品的变体按约定归并，不列。这张表会带出几类误报，扫一眼排除：
+中文名（巅峰设计 → Peak Design）、片假名音译（バッファロー → BUFFALO）、子品牌（Amaran → 爱图仕、Soundcore → 安克）、公司名（安克创新 → 安克）。
+2026-09 各站前 12 行里约三分之二是真归错。下游按小类出品牌份额，所以 OTHERS 也按二级类目看、每个小类的头部品牌也要过目：
+头部品牌不属于这个小类（电脑显示器厂商排进摄影监视器），说明打标或品牌之一错了。''')
 
 
 # ---------- 08 平台类目树 ----------
@@ -842,10 +1123,28 @@ def module_09():
                 '残差叶看吸进了哪些节点。平台类目是服务商的口径，只能近似商品形态，结论写“按平台类目估”。全量在 views/20_leaf_paths.csv。\n\n' +
                 ('\n'.join(part) if part else '缺少视图 20_leaf_paths（先跑 views.py run --only 20）。\n'))
 
-    rows = [[label(s, p), int(len(sample[(sample.site == s) & (sample.platform == p)]))] for s, p, _ in sps()] if len(sample) else []
-    body.append(f'## 七、打标正确性抽样（{end}）\n\n样本在 views/13_tag_sample.csv：每个叶子件数前 3（头部必核）+ 打散后的 2 个，'
-                '“-其他”叶取前 10。按 inputs/标准/判定标准.md 逐条判，计法与交回格式见 references/tagging.md，'
-                '判完用 scripts/tagging.py 汇总不符率。\n\n' + table(['站点/平台', '样本 SPU 数'], rows))
+    items = read('22_leaf_items', required=False)
+    part = []
+    for site, platform, _ in sps():
+        x = items[(items.site == site) & (items.platform == platform)] if len(items) else items
+        if len(x):
+            part.append(f'### {label(site, platform)}\n\n' + table(
+                ['小类', '小类主体根节点', 'product_id', '品牌', '标题', '平台路径末四级', '占小类额', '该根节点占小类额'], off_root_items(x)))
+    body.append(f'## 七、小类里挂在少见平台根节点下的商品（{shift(end, -2)} ~ {end} 合计；该根节点不到小类金额一成、商品占小类额 ≥1%）\n\n'
+                '一个小类的商品通常集中在一两个平台根节点下；从不相干的根节点混进来的（摄影箱里挂在乐器类目下的航空箱）多半是错分，'
+                '也可能是范围外采集。逐条看标题判。\n\n' + ('\n'.join(part) if part else '缺少视图 22_leaf_items（先跑 views.py run --only 22）。\n'))
+
+    rows = []
+    if len(sample):
+        import tagging
+        for s, p_, _ in sps():
+            x = sample[(sample.site == s) & (sample.platform == p_)]
+            groups = [tagging.group_of(int(r['rk_units']), r['l3'], r.get('rk_amount'), r.get('price_ratio')) for r in x.to_dict('records')]
+            rows.append([label(s, p_), len(x)] + [groups.count(g) for g in tagging.GROUPS])
+    body.append(f'## 八、打标正确性抽样（{end}）\n\n样本在 views/13_tag_sample.csv：每个叶子件数前 3、金额前 3（头部必核）、'
+                '单价 ≥ 叶子中位数 10 倍的金额前 3（贵价），加打散后的 2 个；“-其他”叶取件数前 10。只按件数抽会漏掉件数少、单价高、'
+                '却左右叶子金额的错分。按 inputs/标准/判定标准.md 逐条判，计法与交回格式见 references/tagging.md，'
+                '判完用 scripts/tagging.py 汇总不符率。\n\n' + table(['站点/平台', '样本 SPU 数'] + list(tagging.GROUPS), rows))
     write('09_打标质量.md', '打标质量', '\n'.join(body), intro='''
 标准类目与属性标签由服务商按「VIJIM类目映射准则」打标，打标正确性在验收范围内。这里给出结构、完整、一致、残差叶、属性填充的客观结果；
 正确与否要读标题按准则判（抽样 + 变化驱动商品必核），见 references/tagging.md。''')
@@ -1106,11 +1405,11 @@ def main():
 | 01_到货与水位.md | 1 到货与完整性、2 站点水位 | 国家×平台月度序列与台阶、估算摆动、违季节标记 |
 | 02_覆盖估算与长尾.md | 3 覆盖还是估算、6 长尾 | 头部占比、固定集合、新增留存消失、长尾形状 |
 | 03_类目四项结果_一级.md | 4 四项结果 | 一级类目件额 SPU 均价的环比同比与近 13 月走势 |
-| 04_类目贡献与异常.md | 4 四项结果 | 二三级对父类变化的贡献；全历史叶子异常；单品对一级类目的影响 |
-| 05_价格.md | 5 价格 | 跳价计数与明细、价格带迁移 |
-| 07_品牌.md | 7 品牌层 | OTHERS 占比、品牌数、品牌与类目背离、双口径前五 |
+| 04_类目贡献与异常.md | 4 四项结果 | 二三级对父类变化的贡献；全历史叶子异常；单品对一级类目、对小类的影响 |
+| 05_价格.md | 5 价格 | 跳价计数与明细、跟同类比的离群价、价格带迁移 |
+| 07_品牌.md | 7 品牌层 | OTHERS 占比（站点、二级类目）、品牌数、品牌与类目背离、双口径前五、品牌清洗核对、各小类前五品牌 |
 | 08_平台类目树.md | 8 平台类目树 | 新增/消失/断档路径、采购范围逐月核对 |
-| 09_打标质量.md | 9 打标质量 | 结构、完整、一致、残差叶、属性填充、叶子的平台类目构成、抽样入口 |
+| 09_打标质量.md | 9 打标质量 | 结构、完整、一致、残差叶、属性填充、叶子的平台类目构成、少见平台根节点下的商品、抽样入口 |
 | 10_本品.md | 10 本品对拍 | 本品份额与走势、内部数据是否到位 |
 | 11_治理承接.md | 11 治理承接 | 发布 vs 源表逐格对账、治理层覆盖率指标 |
 | 对照_已知缺陷.md | 12 已知缺陷复验 | 台账对象的路径轨迹（第 6 步才读） |

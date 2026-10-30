@@ -129,6 +129,17 @@ def init(month: str, base: Path) -> Path:
     return run
 
 
+def taxonomy_l1(path: Path) -> list[str]:
+    """Level-1 names of the frozen standard (empty when taxonomy.py did not freeze one)."""
+    if not path.exists():
+        return []
+    names = set()
+    for line in path.read_text().splitlines():
+        v = json.loads(line).get('stdcategory1') if line.strip() else None
+        names |= set(v if isinstance(v, list) else [v] if v else [])
+    return sorted(n for n in names if n and n != '其他')
+
+
 def plan(run: Path) -> list[dict]:
     meta = json.loads((run / 'run.json').read_text())
     config = load_config(run / 'inputs')
@@ -137,6 +148,7 @@ def plan(run: Path) -> list[dict]:
     recent = shift(end, -12)
     brands = list(config.get('本品品牌', [])) + list(config.get('本品杂音品牌', []))
     common = {'START': start, 'END': end, 'RECENT_FROM': recent, 'MONTH': end, 'PREV': shift(end, -1), 'YOY': shift(end, -12),
+              'Q_FROM': shift(end, -2), 'YOY_Q_FROM': shift(end, -14),
               'RELEASE': meta['release']['release_id'], 'SEED': f'acceptance-{end}'}
     pids = ledger_pids(run / 'inputs')
     # Every query scans the whole table whatever its site filter, so each view runs
@@ -154,6 +166,19 @@ def plan(run: Path) -> list[dict]:
         all_months.append(shift(all_months[-1], 1))
     for v in ('09_platform_paths', '15_gov_recon'):
         jobs.append({'view': v, 'parts': [{'START': mm, 'END': mm, 'CHUNK': mm} for mm in all_months]})
+    # The leaf-level views aggregate every SPU over three months; one query for all sites runs past the
+    # ten-minute limit of the network path, so they run one site × platform at a time, and Tmall (six times
+    # the rows of Amazon US) one level-1 category at a time. A leaf never spans two parts, so nothing is cut.
+    l1s = taxonomy_l1(run / 'inputs' / '标准' / 'taxonomy.ndjson')
+    for v in ('22_leaf_items', '23_brand_map', '24_leaf_brands'):
+        parts = []
+        for sp in meta['site_platforms']:
+            base = {'SITE': sp['site'], 'PLATFORM': sp['platform'], 'L1': '%', 'CHUNK': f"{sp['site']}_{sp['platform']}"}
+            if v != '23_brand_map' and sp['platform'] == 'Tmall' and l1s:
+                parts += [{**base, 'L1': l1, 'CHUNK': f"{base['CHUNK']}_{l1}"} for l1 in l1s]
+            else:
+                parts.append(base)
+        jobs.append({'view': v, 'parts': parts})
     jobs.append({'view': '03_churn', 'parts': [
         {'LAG': str(lag), 'FROM': shift(start, -lag), 'START_MI': str(index(start)), 'END_MI': str(index(end))}
         for lag in (1, 12)]})

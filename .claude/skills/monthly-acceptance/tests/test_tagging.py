@@ -47,3 +47,12 @@ def test_tally_reports_rows_it_cannot_count():
     assert any('结论不是' in p for p in problems)
     assert any('重复' in p for p in problems)
     assert any('不在样本里' in p for p in problems)
+
+
+def test_systematic_lists_leaves_whose_misfits_form_a_pattern():
+    # Mexico 监视器: all three units-top items were portable computer displays; one stray misfit elsewhere is not a pattern.
+    m = pd.DataFrame([{'l1': '音视频类', 'l2': '监视器', 'l3': '监视器', 'product_id': p, 'verdict': '不符', 'group': '头部', 'amount': a}
+                      for p, a in (('DISPLAY_1', 520000.0), ('DISPLAY_2', 240000.0), ('DISPLAY_3', 270000.0))] +
+                     [{'l1': '灯光类', 'l2': '摄影补光灯', 'l3': 'COB补光灯', 'product_id': 'x', 'verdict': '不符', 'group': '随机', 'amount': 10.0}])
+    rows = tagging.systematic(m, {('音视频类', '监视器', '监视器'): 8_500_000.0, ('灯光类', '摄影补光灯', 'COB补光灯'): 1e6})
+    assert [r[0] for r in rows] == ['监视器 > 监视器'] and rows[0][1] == 3 and rows[0][2] == '12.1%'

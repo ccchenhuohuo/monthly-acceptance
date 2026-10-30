@@ -57,5 +57,5 @@ def test_every_shipped_sql_is_readonly_and_cte_free(path):
     assert not text.lstrip().upper().startswith('WITH'), 'doris MCP returns no rows for WITH queries'
     params = {k: 'x' for k in ('START', 'END', 'RECENT_FROM', 'MONTH', 'PREV', 'YOY', 'RELEASE', 'SEED', 'N', 'FROM', 'LAG',
                                'START_MI', 'END_MI', 'SITE', 'PLATFORM', 'L1', 'L2', 'L3', 'BASE', 'CUR', 'C1',
-                               'C2', 'C3', 'C4', 'BRAND', 'FROM_RANK', 'TO_RANK')}
+                               'C2', 'C3', 'C4', 'BRAND', 'FROM_RANK', 'TO_RANK', 'Q_FROM', 'YOY_Q_FROM')}
     assert q.readonly(q.render(path.read_text(), params, {'BRANDS': ['a'], 'PIDS': ['1']}))
