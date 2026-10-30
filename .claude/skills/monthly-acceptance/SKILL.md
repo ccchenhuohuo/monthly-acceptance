@@ -26,7 +26,7 @@ description: 月度大盘数据验收。服务商每月把爬虫加算法估出�
 2. **跑视图**：`python3 $S/views.py run RUN`，全历史、全部站点，串行约 45–60 分钟（集群忙时更久），放后台跑。单个视图失败会自动重试一次，仍失败记入 `views/errors.json`，可用 `--only <编号>` 单独补跑。
 3. **生成摘要**：`python3 $S/digest.py RUN`，按 `RUN/digest/README.md` 的顺序读，每份读全。
 4. **判读**：按十二个模块自顶向下读，现象、已做检查、疑点随手记进 `RUN/notes.md`。
-5. **下钻**：`python3 $S/q.py RUN --name <名> --file .claude/skills/monthly-acceptance/sql/drill/<模板>.sql --param K=V ...` 追到 SPU / ASIN 与平台路径；也可以 `--sql` 直接写。打标按 `references/tagging.md` 抽样判定，样本多时按国家开子 agent 并行判，主 agent 复核其“不符”项。
+5. **下钻**：`python3 $S/q.py RUN --name <名> --file .claude/skills/monthly-acceptance/sql/drill/<模板>.sql --param K=V ...` 追到 SPU / ASIN 与平台路径；也可以 `--sql` 直接写。打标按 `references/tagging.md` 抽样判定：按国家×平台开子 agent 并行判，按统一计法交回 `queries/打标判定_<站点>_<平台>.csv`；主 agent 复核件数最大的不符项后用 `python3 $S/tagging.py RUN` 汇总不符率；整叶错分先看 09 摘要里叶子的平台类目构成。
 6. **对照历史**：读 `RUN/digest/对照_已知缺陷.md`、`验收/大盘数据变迁台账.md`、`验收/类目树变更台账.md`、`验收/案例库.md`，逐条标出一致 / 新增 / 已修复 / 不再出现。
 7. **收尾**：`python3 $S/views.py check RUN` 确认运行期间源表与现役发布未变；按 `references/report.md` 写 `RUN/报告.md`。
 
@@ -56,5 +56,5 @@ description: 月度大盘数据验收。服务商每月把爬虫加算法估出�
 - `references/methodology.md`：数据事实、看的顺序、四项结果与贡献、病种指纹、判别工具、判定语境、方法级教训、证据链写法。
 - `references/checks.md`、`references/tagging.md`、`references/report.md`、`references/sorftime.md`。
 - `sql/views/`：全量视图（文件头写明回答什么）；`sql/drill/`：下钻模板（文件头写明参数）。全部不用 `WITH`，可直接贴进 doris MCP 随手看。
-- `scripts/`：`q.py` 查询通道、`views.py` 开工 / 跑视图 / 收尾复核、`digest.py` 摘要、`taxonomy.py` 冻结类目标准。
+- `scripts/`：`q.py` 查询通道、`views.py` 开工 / 跑视图 / 收尾复核、`digest.py` 摘要、`taxonomy.py` 冻结类目标准、`tagging.py` 汇总打标判定。
 - 项目侧 `验收/`：`config.yaml`（站点、本品、标准来源）、`项目范围.md` 与 `scope.json`（采购范围）、`已知缺陷台账.json`、`案例库.md`、`大盘数据变迁台账.md`、`类目树变更台账.md`、`内部数据/YYYY-MM/`、`runs/YYYY-MM/<运行>/`。

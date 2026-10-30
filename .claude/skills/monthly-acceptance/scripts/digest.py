@@ -115,6 +115,15 @@ def k(x) -> str:
     return f'{x:.0f}'
 
 
+def text(x) -> str:
+    return x if isinstance(x, str) else ''
+
+
+def tail_path(path: str, n: int) -> str:
+    """The last n levels of a ' > ' joined path: the levels that name the product type."""
+    return ' > '.join([x for x in path.split(' > ') if x][-n:])
+
+
 def table(headers: list[str], rows: list[list]) -> str:
     if not rows:
         return '（无）\n'
@@ -400,8 +409,44 @@ def anomalies(g: pd.DataFrame, site: str, platform: str, metric: str, floor_shar
     return [f[1] for f in found[:limit]]
 
 
+def spu_impacts(c: pd.DataFrame, g: pd.DataFrame, limit: int = 10) -> list[list]:
+    """SPUs that carry or swing a whole level-1 category between last month and the latest month."""
+    end, prev_m = META['month'], shift(META['month'], -1)
+    l1 = {(r['l1'], r['m']): r for r in g[g.lvl == 1].to_dict('records')}
+    found = []
+    for r in c.to_dict('records'):
+        cur, base = l1.get((r['l1'], end)), l1.get((r['l1'], prev_m))
+        if cur is None or not cur['units'] or not cur['amount']:
+            continue
+        a1, u1 = cur['amount'], cur['units']
+        a0, u0 = (base['amount'], base['units']) if base is not None else (0.0, 0.0)
+        da, du = r['amount_cur'] - r['amount_prev'], r['units_cur'] - r['units_prev']
+        sa, su = r['amount_cur'] / a1, r['units_cur'] / u1
+        ca = da / (a1 - a0) if a1 != a0 else None
+        cu = du / (u1 - u0) if u1 != u0 else None
+        marks = []
+        if max(sa, su) >= 0.25:
+            marks.append('单品占类目≥25%')
+        # A share of a near-zero category change means nothing; require the category itself to have moved.
+        if a0 and abs(a1 - a0) >= 0.05 * a0 and abs(ca) >= 0.5 and abs(da) >= 0.02 * max(a0, a1):
+            marks.append('主导类目额环比')
+        if u0 and abs(u1 - u0) >= 0.05 * u0 and abs(cu) >= 0.5 and abs(du) >= 0.02 * max(u0, u1):
+            marks.append('主导类目件环比')
+        if not any(x.startswith('主导') for x in marks) and (abs(da) >= 0.05 * max(a0, a1) or abs(du) >= 0.05 * max(u0, u1)):
+            marks.append('单品大幅变动')
+        if not marks and max(sa, su) < 0.10:
+            continue
+        found.append((max(sa, su, abs(da) / a1, abs(du) / u1), [
+            r['l1'], r['product_id'], text(r['brand']), (text(r['title_cn']) or text(r['title_raw']))[:40],
+            tail_path(text(r['platform_path']), 2), f"{num(r['units_prev'])} → {num(r['units_cur'])}",
+            f"{money(r['amount_prev'])} → {money(r['amount_cur'])}", f'{share(su)} / {share(sa)}', share(cu), share(ca),
+            pct(ratio(a1, a0)), pct(ratio(a1 - r['amount_cur'], a0 - r['amount_prev'])), '；'.join(marks)]))
+    found.sort(key=lambda x: -x[0])
+    return [f[1] for f in found[:limit]]
+
+
 def module_04():
-    grid = read('02_std_grid')
+    grid, conc = read('02_std_grid'), read('21_spu_concentration', required=False)
     end = META['month']
     body = []
     for site, platform, _ in sps():
@@ -415,11 +460,20 @@ def module_04():
             body.append(f'### 全历史三级叶子异常（{title}）\n\n' + table(
                 ['月', '叶子', '上月', '本月', '变化', '占全站关注口径', '判据', '当月站点级标记'],
                 anomalies(g, site, platform, metric, floor_share, limit)))
+        c = conc[(conc.site == site) & (conc.platform == platform)] if len(conc) else conc
+        body.append(f'### 单品对一级类目的影响（{shift(end, -1)} → {end}）\n\n' + (table(
+            ['一级类目', 'product_id', '品牌', '标题', '平台路径末两级', '件 上月→本月', '额 上月→本月', '占类目件/额（本月）',
+             '占类目Δ件', '占类目Δ额', '类目额环比', '剔除该商品后', '标记'], spu_impacts(c, g)) if len(conc) else
+            '缺少视图 21_spu_concentration（先跑 views.py run --only 21）。\n'))
     write('04_类目贡献与异常.md', '标准类目变化贡献与全历史异常', '\n'.join(body), intro='''
 贡献 = 子类变化 / 父类变化，正负有意义、可超过 100%；父类变化接近零时不按比值排名，看绝对变化与抵消。
 拉动父类增长 = 子类变化 / 父类基期。贡献只定位变化，不证明是错误。
 全历史异常：每个三级叶子用自身历史的环比分布（中位数与 MAD）做稳健 z 分，|z|≥4 且变化量达到全站关注口径的 0.5%（SPU 为 1%）才列；
-“出现/消失”是上月或本月无观测。最后一列是同月的站点级标记，用来区分“整站一起动”与“这个叶子自己动”。''')
+“出现/消失”是上月或本月无观测。最后一列是同月的站点级标记，用来区分“整站一起动”与“这个叶子自己动”。
+单品对一级类目的影响：列出本月占类目件或额 ≥10% 的 SPU 和带标记的 SPU。主导类目环比 = 类目环比动了 ≥5%，其中一半以上来自这一个 SPU
+（且它的变化达到类目体量 2%）；单品大幅变动 = 类目没被它主导，但它自己的变化达到类目体量 5%（常与另一个 SPU 反向抵消，先查是不是换了身份）。
+“剔除该商品后”是两期都去掉它的类目额环比，属敏感性分析，不是修正值。被标记的商品先核对标题、品牌、平台路径说的是不是同一件商品，
+再看量价——价格变化不到 3 倍时跳价检查拦不下它。''')
 
 
 # ---------- 05 价格 ----------
@@ -637,6 +691,24 @@ def module_08():
 
 # ---------- 09 打标质量 ----------
 
+def leaf_mix(lp: pd.DataFrame, min_share: float = 0.01, limit: int = 30) -> list[list]:
+    """Platform-category makeup of the leaves that weigh in a site, plus every residual leaf of some size."""
+    total = lp.units.sum()
+    if not total:
+        return []
+    rows = []
+    for (l1, l2, l3), g in lp.groupby(['l1', 'l2', 'l3']):
+        u = g.units.sum()
+        if u < min_share * total and not (l3.endswith('-其他') and u >= 0.001 * total):
+            continue
+        node = [tail_path(' > '.join(p), 3) for p in zip(g.c1, g.c2, g.c3, g.c4)]
+        nodes = g.assign(node=node).groupby('node').units.sum().sort_values(ascending=False)
+        rows.append((u, [f'{l1} > {l3}' if l2 == l3 else f'{l1} > {l2} > {l3}', num(u), share(u / total), len(nodes),
+                         '；'.join(f'{n} {share(v / u)}' for n, v in nodes.head(3).items()), share(nodes.head(3).sum() / u)]))
+    rows.sort(key=lambda x: -x[0])
+    return [r[1] for r in rows[:limit]]
+
+
 def module_09():
     grid, tags, flow, drift = read('02_std_grid'), read('10_tag_values'), read('11_tag_flow'), read('12_tag_drift')
     sample, mapping, policy, fp = read('13_tag_sample'), read('17_gov_mapping'), read('18_gov_tags'), read('01_fingerprint')
@@ -754,9 +826,22 @@ def module_09():
     body.append('## 五、属性标签填充率（适用叶子、最新月 ≥50 行）\n\n准则允许属性识别准确率低于类目层，优先保障高销头部商品；这里只看填充率的突变与异常低位。\n\n' +
                 table(['站点/平台', '叶子', '维度', f'{end}', '上月', '13月最低', '13月最高', '标记'], rows))
 
+    lp = read('20_leaf_paths', required=False)
+    part = []
+    for site, platform, _ in sps():
+        x = lp[(lp.site == site) & (lp.platform == platform)] if len(lp) else lp
+        if len(x):
+            part.append(f'### {label(site, platform)}\n\n' + table(
+                ['叶子', '件', '占本站关注件', '平台节点数', '件数最多的三个平台节点（占叶子件数）', '前三合计'], leaf_mix(x)))
+    body.append(f'## 六、叶子的平台类目构成（{end}；占本站关注件 ≥1% 的叶子与残差叶）\n\n'
+                '平台节点取平台类目末三级。头部样本出现某类错分时，看同类商品所在的节点占整叶多少，按节点件额估整叶错分占比；'
+                '残差叶看吸进了哪些节点。平台类目是服务商的口径，只能近似商品形态，结论写“按平台类目估”。全量在 views/20_leaf_paths.csv。\n\n' +
+                ('\n'.join(part) if part else '缺少视图 20_leaf_paths（先跑 views.py run --only 20）。\n'))
+
     rows = [[label(s, p), int(len(sample[(sample.site == s) & (sample.platform == p)]))] for s, p, _ in sps()] if len(sample) else []
-    body.append(f'## 六、打标正确性抽样（{end}）\n\n样本在 views/13_tag_sample.csv：每个叶子件数前 3（头部必核）+ 打散后的 2 个，'
-                '“-其他”叶取前 10。按 inputs/标准/判定标准.md 逐条判，方法见 references/tagging.md。\n\n' + table(['站点/平台', '样本 SPU 数'], rows))
+    body.append(f'## 七、打标正确性抽样（{end}）\n\n样本在 views/13_tag_sample.csv：每个叶子件数前 3（头部必核）+ 打散后的 2 个，'
+                '“-其他”叶取前 10。按 inputs/标准/判定标准.md 逐条判，计法与交回格式见 references/tagging.md，'
+                '判完用 scripts/tagging.py 汇总不符率。\n\n' + table(['站点/平台', '样本 SPU 数'], rows))
     write('09_打标质量.md', '打标质量', '\n'.join(body), intro='''
 标准类目与属性标签由服务商按「VIJIM类目映射准则」打标，打标正确性在验收范围内。这里给出结构、完整、一致、残差叶、属性填充的客观结果；
 正确与否要读标题按准则判（抽样 + 变化驱动商品必核），见 references/tagging.md。''')
@@ -925,11 +1010,11 @@ def main():
 | 01_到货与水位.md | 1 到货与完整性、2 站点水位 | 国家×平台月度序列与台阶、估算摆动、违季节标记 |
 | 02_覆盖估算与长尾.md | 3 覆盖还是估算、6 长尾 | 头部占比、固定集合、新增留存消失、长尾形状 |
 | 03_类目四项结果_一级.md | 4 四项结果 | 一级类目件额 SPU 均价的环比同比与近 13 月走势 |
-| 04_类目贡献与异常.md | 4 四项结果 | 二三级对父类变化的贡献；全历史叶子异常 |
+| 04_类目贡献与异常.md | 4 四项结果 | 二三级对父类变化的贡献；全历史叶子异常；单品对一级类目的影响 |
 | 05_价格.md | 5 价格 | 跳价计数与明细、价格带迁移 |
 | 07_品牌.md | 7 品牌层 | OTHERS 占比、品牌数、品牌与类目背离、双口径前五 |
 | 08_平台类目树.md | 8 平台类目树 | 新增/消失/断档路径、采购范围逐月核对 |
-| 09_打标质量.md | 9 打标质量 | 结构、完整、一致、残差叶、属性填充、抽样入口 |
+| 09_打标质量.md | 9 打标质量 | 结构、完整、一致、残差叶、属性填充、叶子的平台类目构成、抽样入口 |
 | 10_本品.md | 10 本品对拍 | 本品份额与走势、内部数据是否到位 |
 | 11_治理承接.md | 11 治理承接 | 发布 vs 源表逐格对账、治理层覆盖率指标 |
 | 对照_已知缺陷.md | 12 已知缺陷复验 | 台账对象的路径轨迹（第 6 步才读） |

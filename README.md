@@ -1,6 +1,6 @@
 # monthly-acceptance
 
-**月度大盘数据验收 Skill · 0.1.0**
+**月度大盘数据验收 Skill · 0.1.1**
 
 服务商每月把爬虫加算法估出的市场数据全量重推到 Doris `internal.flywheel.monthly_sales_wide`（平台类目 + AI 标准类目 + 属性标签合在一张表）。这个 Skill 自顶向下判断这批数能不能信、哪里不能信、对我们用的数影响多大，交付一篇文字验收报告。
 
@@ -39,5 +39,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider .claude/skill
 
 ## 版本
 
+- 0.1.1（2026-10-29）：首跑 2026-09 后补的三处方法缺口——叶子的平台类目构成视图（不靠抽样估整叶错分）、单品集中度视图（抓价格不跳的身份错联与估算失真）、打标判定的统一计法与汇总脚本 tagging.py。
 - 0.1.0（2026-10-29）：按单表 monthly_sales_wide 与 VIJIM 标准重建；恢复价格、长尾、头部法、品牌、本品、类目树维度，新增打标质量与治理承接；去掉 0.0.x 的证据链、议题合同与完成门槛。
 - 0.0.2 及更早：全景与议题架构，基于已删除的旧表，保留在 tag `v0.0.2-final`。

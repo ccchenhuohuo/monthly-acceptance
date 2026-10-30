@@ -112,7 +112,8 @@ def plan(run: Path) -> list[dict]:
     # once over all sites; only the churn view runs twice, once per comparison lag.
     single = ['01_fingerprint', '02_std_grid', '04_price_bands', '05_price_jumps', '05_price_jump_counts',
               '06_spu_shape', '07_fixed_cohort', '08_brands', '10_tag_values', '11_tag_flow',
-              '13_tag_sample', '14_own_brand', '16_gov_coverage', '17_gov_mapping', '18_gov_tags']
+              '13_tag_sample', '14_own_brand', '16_gov_coverage', '17_gov_mapping', '18_gov_tags',
+              '20_leaf_paths', '21_spu_concentration']
     jobs = [{'view': v, 'parts': [{}]} for v in single]
     # Month-grained views with high-cardinality keys run one month at a time: the
     # network path to Doris drops connections on queries that run ten minutes or more,
